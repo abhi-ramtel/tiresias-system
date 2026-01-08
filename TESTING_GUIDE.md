@@ -84,7 +84,7 @@ waiting for connection
 ### Terminal 3: Deploy App to iPhone
 
 ```bash
-cd /Users/abhiramtel/Developer/tiresias-system/client-ios
+cd /Users/user/folder/tiresias-system/client-ios
 npx react-native run-ios --udid "YOUR_DEVICE_UDID"
 ```
 

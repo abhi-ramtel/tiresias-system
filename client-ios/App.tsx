@@ -20,7 +20,7 @@ import {
 } from 'react-native-vision-camera';
 import { Worklets } from 'react-native-worklets-core';
 
-// Edge server configuration - connect via USB tunnel (localhost because iproxy forwards it)
+// Edge server configuration - connect via WiFi to Mac's IP
 const EDGE_SERVER_URL = 'ws://127.0.0.1:8000/ws/video';
 
 function App(): React.JSX.Element {
@@ -93,7 +93,6 @@ function App(): React.JSX.Element {
     try {
       // Capture photo as JPEG
       const photo = await cameraRef.current.takePhoto({
-        qualityPrioritization: 'speed',
         flash: 'off',
         enableShutterSound: false,
       });
