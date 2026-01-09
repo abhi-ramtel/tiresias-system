@@ -1,1 +1,0 @@
-# Main endpoint for fastapi
