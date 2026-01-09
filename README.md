@@ -55,7 +55,7 @@ The script will:
 
 You should see:
 ```
-📍 Your Mac's IP address: 10.84.104.88
+📍 Your Mac's IP address: LOCAL_MAC_IP
 🚀 Tiresias Edge Server v2.0
 📡 Server: http://0.0.0.0:8000
 ```

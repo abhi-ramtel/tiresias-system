@@ -1,7 +1,7 @@
 # 🔥 FIREWALL FIX - Cannot Reach Server
 
 ## Problem
-iPhone can't connect to Mac server at `10.84.104.88:8000`
+iPhone can't connect to Mac server at `LOCAL_IP:8000`
 
 **Error:** "Cannot reach the server at MACIP:8000"
 
@@ -72,14 +72,14 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp $(which python
 
 ### 1. From Your Mac Terminal:
 ```bash
-curl http://10.84.104.88:8000/health
+curl http://LOCAL_MAC_IP:8000/health
 ```
 Should return: `{"status":"ok",...}`
 
 ### 2. From iPhone Safari:
 Open Safari on your iPhone and go to:
 ```
-http://10.84.104.88:8000/health
+http://LOCAL_MAC_IP:8000/health
 ```
 
 If you see `{"status":"ok"}` - the firewall is fixed! ✅
@@ -152,7 +152,7 @@ Try these:
 
 ## 🎯 What Should Work After Fix
 
-1. iPhone Safari can open `http://10.84.104.88:8000/health`
+1. iPhone Safari can open `http://LOCAL_MAC_IP:8000/health`
 2. TiresiasApp can connect (green "Connected" status)
 3. Server shows: `🟢 Client Connected`
 4. Frames stream successfully

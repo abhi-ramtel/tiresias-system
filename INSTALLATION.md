@@ -127,11 +127,16 @@ If you get a signing error, change the bundle ID:
 
 ## Step 6: Use the App
 
+**Need to find IP?**
+```bash
+ipconfig getifaddr en0
+```
+
 ### Connect to Server
 
 1. **Tap the gear icon** (⚙️) in top-right
 2. **Enter your Mac's IP address** (from Step 1)
-   - Example: `10.84.104.88`
+   - Example: `LOCAL_MAC_IP`
 3. **Tap "Save"**
 
 ### Start Streaming

@@ -12,7 +12,7 @@ struct ContentView: View {
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var webSocketManager = WebSocketManager()
     
-    @State private var serverIP: String = "10.84.104.88"
+    @AppStorage("serverIP") private var serverIP: String = "10.84.104.88" // Change to you ip
     @State private var showingSettings = false
     
     var body: some View {

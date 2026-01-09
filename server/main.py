@@ -7,9 +7,10 @@ FastAPI WebSocket server for receiving video frames from iOS app
 import uvicorn
 import asyncio
 import time
+import base64
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
@@ -34,6 +35,8 @@ class ServerStats:
         self.active_connections = 0
         self.total_frames_received = 0
         self.start_time = datetime.now()
+        self.latest_frame: bytes = None  # Store latest frame for preview
+        self.latest_frame_time: datetime = None
         
     def to_dict(self):
         uptime = (datetime.now() - self.start_time).total_seconds()
@@ -41,7 +44,8 @@ class ServerStats:
             "total_connections": self.total_connections,
             "active_connections": self.active_connections,
             "total_frames_received": self.total_frames_received,
-            "uptime_seconds": int(uptime)
+            "uptime_seconds": int(uptime),
+            "has_frame": self.latest_frame is not None
         }
 
 stats = ServerStats()
@@ -77,6 +81,96 @@ async def get_stats():
     return JSONResponse(stats.to_dict())
 
 
+@app.get("/frame")
+async def get_latest_frame():
+    """Return the latest received frame as JPEG"""
+    if stats.latest_frame is None:
+        return Response(content="No frame available", status_code=404)
+    return Response(content=stats.latest_frame, media_type="image/jpeg")
+
+
+@app.get("/view")
+async def view_stream():
+    """Simple HTML page to view the live stream"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Tiresias Live View</title>
+        <style>
+            body { 
+                background: #1a1a1a; 
+                color: white; 
+                font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                margin: 0;
+                padding: 20px;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+            }
+            h1 { margin-bottom: 10px; }
+            #stats { color: #888; margin-bottom: 20px; }
+            #frame { 
+                max-width: 90vw; 
+                max-height: 70vh; 
+                border: 2px solid #333;
+                border-radius: 8px;
+            }
+            .no-stream {
+                padding: 100px 50px;
+                background: #333;
+                border-radius: 8px;
+                color: #666;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>📹 Tiresias Live View</h1>
+        <div id="stats">Connecting...</div>
+        <img id="frame" class="no-stream" alt="Waiting for stream...">
+        
+        <script>
+            const img = document.getElementById('frame');
+            const statsDiv = document.getElementById('stats');
+            let frameCount = 0;
+            let lastUpdate = Date.now();
+            
+            async function updateFrame() {
+                try {
+                    const response = await fetch('/frame?' + Date.now());
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        img.src = URL.createObjectURL(blob);
+                        img.classList.remove('no-stream');
+                        frameCount++;
+                    }
+                } catch (e) {}
+            }
+            
+            async function updateStats() {
+                try {
+                    const response = await fetch('/stats');
+                    const data = await response.json();
+                    const fps = frameCount / ((Date.now() - lastUpdate) / 1000);
+                    statsDiv.textContent = `Connections: ${data.active_connections} | Frames: ${data.total_frames_received} | View FPS: ${fps.toFixed(1)}`;
+                    frameCount = 0;
+                    lastUpdate = Date.now();
+                } catch (e) {}
+            }
+            
+            // Update frame every 33ms (~30fps)
+            setInterval(updateFrame, 33);
+            // Update stats every second
+            setInterval(updateStats, 1000);
+            updateFrame();
+            updateStats();
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+
 @app.websocket("/ws/video")
 async def video_stream(websocket: WebSocket):
     """
@@ -108,6 +202,10 @@ async def video_stream(websocket: WebSocket):
                 frame_count += 1
                 fps_frame_count += 1
                 stats.total_frames_received += 1
+                
+                # Store latest frame for preview
+                stats.latest_frame = frame_data
+                stats.latest_frame_time = datetime.now()
                 
                 # Calculate and display FPS every second
                 current_time = time.time()
@@ -153,6 +251,7 @@ def main():
     print("🔌 WebSocket: ws://0.0.0.0:8000/ws/video")
     print("❤️  Health: http://0.0.0.0:8000/health")
     print("📊 Stats: http://0.0.0.0:8000/stats")
+    print("👁️  Live View: http://0.0.0.0:8000/view")
     print("=" * 60)
     print("📱 Connect from iOS using your Mac's IP address")
     print("   Find IP: ipconfig getifaddr en0")

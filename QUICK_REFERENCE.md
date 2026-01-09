@@ -11,8 +11,6 @@ Note your IP address!
 # One-time install
 brew install libimobiledevice
 
-# Start USB tunnel (keep running)
-iproxy 8000 8000
 ```
 App automatically uses USB if WiFi fails!
 
@@ -42,7 +40,7 @@ App automatically uses USB if WiFi fails!
 ┌─────────────────────────────────────────────┐
 │  Terminal 1: Start Server                  │
 │  ./start_server.sh                          │
-│  Note: IP = 10.84.104.88                    │
+│  Note: IP = LOCAL_MAC_IP                    │
 └─────────────────────────────────────────────┘
               ↓
 ┌─────────────────────────────────────────────┐
@@ -57,7 +55,7 @@ App automatically uses USB if WiFi fails!
               ↓
 ┌─────────────────────────────────────────────┐
 │  App: Configure IP                          │
-│  Tap ⚙️ → Enter 10.84.104.88 → Save        │
+│  Tap ⚙️ → Enter LOCAL_MAC_IP → Save        │
 └─────────────────────────────────────────────┘
               ↓
 ┌─────────────────────────────────────────────┐

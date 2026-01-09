@@ -198,7 +198,7 @@ No manual switching needed! Just make sure:
 You can connect multiple iPhones simultaneously:
 
 **iPhone 1 (WiFi):**
-- Use actual Mac IP: `10.84.104.88`
+- Use actual Mac IP: `LOCAL_MAC_IP`
 
 **iPhone 2 (USB):**
 - Use different port:

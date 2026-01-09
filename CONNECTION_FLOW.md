@@ -7,7 +7,7 @@ User Taps "Connect"
          ↓
     ┌────────────────────────────────────────┐
     │  STEP 1: Try WiFi Connection           │
-    │  Testing: http://10.84.104.88:8000     │
+    │  Testing: http://YOUR_IP:8000     │
     └────────────────────────────────────────┘
          ↓
     [Success?]
@@ -46,7 +46,7 @@ User Taps "Connect"
 │                  │   WiFi Network     │                 │
 │  iPhone          │◄──────────────────►│  Mac            │
 │  TiresiasApp     │                    │  Python Server  │
-│                  │    10.84.104.88    │  Port 8000      │
+│                  │    YOUR_MAC_IP_    │  Port 8000      │
 │  - Captures      │    :8000           │                 │
 │  - Compresses    │                    │  - Receives     │
 │  - Streams       │                    │  - Processes    │

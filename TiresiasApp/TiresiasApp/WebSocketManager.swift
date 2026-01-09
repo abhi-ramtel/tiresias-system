@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Network
 
 class WebSocketManager: NSObject, ObservableObject {
     @Published var isConnected = false
@@ -16,7 +17,7 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var errorMessage = ""
     @Published var connectionMethod: String = "WiFi"
     
-    var serverIP: String = "10.84.104.88"
+    var serverIP: String = "10.84.104.88" // Use your own IP here (Change it)
     private let serverPort = 8000
     private var usingUSBFallback = false
     
@@ -28,28 +29,39 @@ class WebSocketManager: NSObject, ObservableObject {
     private let reconnectDelay: TimeInterval = 2.0
     private let maxReconnectAttempts = 5
     private var reconnectAttempts = 0
+    private var userInitiatedDisconnect = false  // Track if user disconnected
     
-    // Session that bypasses proxy (for local network)
+    // Session that bypasses proxy AND Private Relay (for local network)
     private lazy var directSession: URLSession = {
         let config = URLSessionConfiguration.default
-        // Disable proxy using string keys for iOS compatibility
+        // Disable ALL proxies including iCloud Private Relay
         config.connectionProxyDictionary = [
-            "HTTPEnable": 0,
-            "HTTPSEnable": 0
+            "HTTPEnable": false,
+            "HTTPSEnable": false,
+            kCFProxyTypeKey as String: kCFProxyTypeNone as Any
         ] as [String: Any]
         config.timeoutIntervalForRequest = 5
+        config.waitsForConnectivity = false  // Don't wait, fail fast
+        // Disable constrained/expensive network restrictions
+        config.allowsCellularAccess = true
+        config.allowsConstrainedNetworkAccess = true
+        config.allowsExpensiveNetworkAccess = true
         return URLSession(configuration: config)
     }()
     
     override init() {
         super.init()
         let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = true
-        // Disable proxy for WebSocket connection too
+        config.waitsForConnectivity = false  // Don't wait for connectivity
+        // Disable ALL proxies including iCloud Private Relay
         config.connectionProxyDictionary = [
-            "HTTPEnable": 0,
-            "HTTPSEnable": 0
+            "HTTPEnable": false,
+            "HTTPSEnable": false,
+            kCFProxyTypeKey as String: kCFProxyTypeNone as Any
         ] as [String: Any]
+        config.allowsCellularAccess = true
+        config.allowsConstrainedNetworkAccess = true
+        config.allowsExpensiveNetworkAccess = true
         urlSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
     }
     
@@ -61,6 +73,37 @@ class WebSocketManager: NSObject, ObservableObject {
         URL(string: "http://\(serverIP):\(serverPort)/health")!
     }
     
+    // MARK: - Network Checks
+    
+    private func checkNetworkInterface() {
+        let monitor = NWPathMonitor()
+        let queue = DispatchQueue(label: "NetworkMonitor")
+        
+        monitor.pathUpdateHandler = { [weak self] path in
+            monitor.cancel() // Only need one check
+            
+            let isWiFi = path.usesInterfaceType(.wifi)
+            let isCellular = path.usesInterfaceType(.cellular)
+            let isConstrained = path.isConstrained // Private Relay often sets this
+            
+            DispatchQueue.main.async {
+                if isCellular && !isWiFi {
+                    print("⚠️ WARNING: iPhone is on CELLULAR, not WiFi!")
+                    print("   Local server connection will likely fail.")
+                    print("   Please connect to the same WiFi network as your Mac.")
+                } else if isWiFi {
+                    print("✅ iPhone is connected via WiFi")
+                }
+                
+                if isConstrained {
+                    print("⚠️ Network is constrained (possibly Private Relay)")
+                    print("   Consider disabling 'Limit IP Address Tracking' for this WiFi network")
+                }
+            }
+        }
+        monitor.start(queue: queue)
+    }
+    
     // MARK: - Connection Management
     
     func connect() {
@@ -68,6 +111,10 @@ class WebSocketManager: NSObject, ObservableObject {
         
         updateStatus(.connecting)
         usingUSBFallback = false
+        userInitiatedDisconnect = false  // Reset flag when connecting
+        
+        // Check network interface first
+        checkNetworkInterface()
         
         // First try WiFi connection
         print("🔍 Attempting WiFi connection to \(serverIP)...")
@@ -94,10 +141,14 @@ class WebSocketManager: NSObject, ObservableObject {
         usingUSBFallback = true
         updateStatus(.connecting)
         
-        // Try common USB tethering IPs
-        let usbIPs = ["172.20.10.1", "192.168.2.1", serverIP]
+        // Try common USB/local network IPs
+        // Note: 172.20.10.x is when iPhone shares to Mac, not typical for this use case
+        // localhost (127.0.0.1) won't work from iOS device
+        // serverIP is the primary IP we should retry
+        let usbIPs = [serverIP, "192.168.1.1", "192.168.0.1", "10.0.0.1"]
         
-        print("🔍 Attempting USB connection...")
+        print("🔍 Attempting USB/fallback connection...")
+        print("   Note: Ensure iPhone is on same WiFi network as Mac")
         tryNextUSBIP(ips: usbIPs, index: 0)
     }
     
@@ -108,10 +159,11 @@ class WebSocketManager: NSObject, ObservableObject {
             usingUSBFallback = false
             handleConnectionError(
                 "Cannot reach server.\n\n" +
-                "WiFi: Check same network & firewall\n" +
-                "USB: Connect iPhone via cable\n\n" +
-                "Make sure server is running:\n" +
-                "./start_server.sh"
+                "⚠️ Make sure iPhone is on WiFi (not cellular)\n" +
+                "⚠️ Connect to SAME WiFi as your Mac\n" +
+                "⚠️ Disable iCloud Private Relay:\n" +
+                "   Settings → WiFi → (i) → Limit IP Tracking OFF\n\n" +
+                "Server IP: \(serverIP):8000"
             )
             return
         }
@@ -136,6 +188,11 @@ class WebSocketManager: NSObject, ObservableObject {
                 }
                 self.establishWebSocket()
             } else {
+                if let error = error {
+                    print("   ❌ \(testIP) failed: \(error.localizedDescription)")
+                } else {
+                    print("   ❌ \(testIP) failed: No valid response")
+                }
                 // Try next IP
                 self.tryNextUSBIP(ips: ips, index: index + 1)
             }
@@ -143,16 +200,31 @@ class WebSocketManager: NSObject, ObservableObject {
     }
     
     func disconnect() {
+        print("🔴 Initiating disconnect...")
+        
+        // Mark as user-initiated to prevent auto-reconnect
+        userInitiatedDisconnect = true
+        
+        // Stop ping timer first
         pingTimer?.invalidate()
         pingTimer = nil
-        webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        
+        // Cancel WebSocket with proper closure
+        if let task = webSocketTask {
+            // Send close frame and wait briefly for it to complete
+            task.cancel(with: .normalClosure, reason: "User disconnected".data(using: .utf8))
+        }
         webSocketTask = nil
         reconnectAttempts = 0
         
-        DispatchQueue.main.async {
+        // Reset state on main thread
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             self.isConnected = false
             self.updateStatus(.disconnected)
             self.framesSent = 0
+            self.latencyMs = 0
+            self.connectionMethod = "WiFi"
         }
         print("🔴 Disconnected from server")
     }
@@ -164,19 +236,34 @@ class WebSocketManager: NSObject, ObservableObject {
         request.timeoutInterval = 5
         
         // Use direct session to bypass iCloud Private Relay
-        directSession.dataTask(with: request) { [weak self] data, response, error in
+        directSession.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 if let error = error {
+                    let nsError = error as NSError
                     print("❌ Health check failed: \(error.localizedDescription)")
+                    print("   Error domain: \(nsError.domain), code: \(nsError.code)")
+                    if nsError.code == -1004 {
+                        print("   💡 Hint: Server may not be running or firewall is blocking")
+                    } else if nsError.code == -1003 {
+                        print("   💡 Hint: Cannot find host - check IP address")
+                    } else if nsError.code == -1200 {
+                        print("   💡 Hint: SSL/ATS error - check Info.plist settings")
+                    }
                     completion(false)
                     return
                 }
                 
-                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                    print("✅ Server is reachable")
-                    completion(true)
+                if let httpResponse = response as? HTTPURLResponse {
+                    print("   HTTP Status: \(httpResponse.statusCode)")
+                    if httpResponse.statusCode == 200 {
+                        print("✅ Server is reachable")
+                        completion(true)
+                    } else {
+                        print("⚠️ Server responded with unexpected status: \(httpResponse.statusCode)")
+                        completion(false)
+                    }
                 } else {
-                    print("⚠️ Server responded with unexpected status")
+                    print("⚠️ No HTTP response received")
                     completion(false)
                 }
             }
@@ -278,12 +365,11 @@ class WebSocketManager: NSObject, ObservableObject {
     private func handleConnectionError(_ message: String) {
         DispatchQueue.main.async {
             let method = self.usingUSBFallback ? "USB" : "WiFi"
-        print("🟢 WebSocket connected via \(method)")
+            print("❌ Connection error via \(method): \(message)")
             self.errorMessage = message
             self.showError = true
             self.updateStatus(.error)
         }
-        
     }
     
     private func handleDisconnection() {
@@ -292,7 +378,12 @@ class WebSocketManager: NSObject, ObservableObject {
             self.updateStatus(.disconnected)
         }
         
-        attemptReconnect()
+        // Only auto-reconnect if not user-initiated
+        if !userInitiatedDisconnect {
+            attemptReconnect()
+        } else {
+            print("🔴 User-initiated disconnect, not reconnecting")
+        }
     }
     
     private func attemptReconnect() {
@@ -316,8 +407,6 @@ class WebSocketManager: NSObject, ObservableObject {
 
 extension WebSocketManager: URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        print("🟢 WebSocket connected")
-        reconnectAttempts = 0
         let method = usingUSBFallback ? "USB" : "WiFi"
         print("🟢 WebSocket connected via \(method)")
         reconnectAttempts = 0
@@ -325,18 +414,37 @@ extension WebSocketManager: URLSessionWebSocketDelegate {
         DispatchQueue.main.async {
             self.isConnected = true
             self.connectionMethod = method
+            self.updateStatus(.connected)
         }
-        
-        func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-            print("🔴 WebSocket closed with code: \(closeCode)")
-            handleDisconnection()
-        }
-        
-        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            if let error = error {
-                print("❌ Session error: \(error.localizedDescription)")
-                handleConnectionError(error.localizedDescription)
+    }
+    
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        print("🔴 WebSocket closed with code: \(closeCode)")
+        handleDisconnection()
+    }
+    
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            let nsError = error as NSError
+            print("❌ Session error: \(error.localizedDescription)")
+            print("   Error domain: \(nsError.domain), code: \(nsError.code)")
+            
+            // Provide helpful hints based on error code
+            var hint = ""
+            switch nsError.code {
+            case -1004: hint = "Server not reachable - check if server is running"
+            case -1003: hint = "Cannot find host - check IP address"
+            case -1200, -1202: hint = "SSL/TLS error - HTTP connections require ATS settings in Info.plist"
+            case -1001: hint = "Connection timeout - server may be slow or blocked"
+            case -1005: hint = "Network connection lost"
+            case -1009: hint = "No internet connection"
+            default: break
             }
+            if !hint.isEmpty {
+                print("   💡 Hint: \(hint)")
+            }
+            
+            handleConnectionError(error.localizedDescription)
         }
     }
 }
