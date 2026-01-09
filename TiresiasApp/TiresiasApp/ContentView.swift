@@ -7,12 +7,14 @@
 
 import SwiftUI
 import AVFoundation
+import Foundation
 
 struct ContentView: View {
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var webSocketManager = WebSocketManager()
     
-    @AppStorage("serverIP") private var serverIP: String = "10.84.104.88" // Change to you ip
+    // @AppStorage("serverIP") private var serverIP: String = "10.84.104.88" // Change to you ip
+    @AppStorage("serverIP") private var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "10.84.104.88" // add it to your env file
     @State private var showingSettings = false
     
     var body: some View {
