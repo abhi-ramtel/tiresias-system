@@ -1,114 +1,54 @@
 #!/usr/bin/env python3
-"""
-YOLO Inference Module
-Fast object detection using ultralytics YOLO
-"""
-
 import cv2
 import numpy as np
-from PIL import Image
-import io
-from typing import Optional, List, Dict, Any
 from ultralytics import YOLO
+from typing import List, Dict, Any, Tuple
 
 class YOLODetector:
-    """YOLO-based object detector for real-time inference"""
-    
     def __init__(self, model_path: str = "yolov8n.pt", confidence_threshold: float = 0.5):
-        """
-        Initialize the YOLO detector
-        
-        Args:
-            model_path: Path to YOLO model weights (default: yolov8n for speed)
-            confidence_threshold: Minimum confidence for detections
-        """
+        # Auto-detect Apple Silicon (MPS)
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
-        print(f"✅ YOLO model loaded: {model_path}")
+        print(f"✅ YOLO initialized. Device: {self.model.device}")
         
-    def detect_from_bytes(self, image_bytes: bytes) -> List[Dict[str, Any]]:
+    def process_and_annotate(self, image_bytes: bytes) -> Tuple[bytes, List[Dict[str, Any]]]:
         """
-        Run detection on JPEG image bytes
-        
-        Args:
-            image_bytes: JPEG image data
-            
-        Returns:
-            List of detection dictionaries with class, confidence, and bbox
+        Detects objects and returns:
+        1. JPEG bytes of the image with boxes drawn on it.
+        2. List of detection data (for logic).
         """
-        # Convert bytes to numpy array
+        # 1. Decode Bytes -> Numpy Image
         nparr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
-            return []
-            
-        return self.detect(image)
-        
-    def detect(self, image: np.ndarray) -> List[Dict[str, Any]]:
-        """
-        Run detection on numpy image array
-        
-        Args:
-            image: BGR image as numpy array
-            
-        Returns:
-            List of detection dictionaries
-        """
-        # Run inference
+            return image_bytes, []
+
+        # 2. Run Inference
         results = self.model(image, conf=self.confidence_threshold, verbose=False)
-        
+        result = results[0] # We only have 1 frame
+
+        # 3. Generate "Robot Vision" Image
+        # plot() draws the boxes, labels, and confidence scores
+        annotated_image = result.plot()
+
+        # 4. Extract Data (for safety logic later)
         detections = []
-        for result in results:
-            boxes = result.boxes
-            for box in boxes:
-                detection = {
-                    "class": result.names[int(box.cls[0])],
-                    "confidence": float(box.conf[0]),
-                    "bbox": {
-                        "x1": float(box.xyxy[0][0]),
-                        "y1": float(box.xyxy[0][1]),
-                        "x2": float(box.xyxy[0][2]),
-                        "y2": float(box.xyxy[0][3])
-                    }
-                }
-                detections.append(detection)
-                
-        return detections
-        
-    def get_class_names(self) -> List[str]:
-        """Get list of class names the model can detect"""
-        return list(self.model.names.values())
+        for box in result.boxes:
+            detections.append({
+                "class": result.names[int(box.cls[0])],
+                "confidence": float(box.conf[0]),
+                "bbox": box.xyxy[0].tolist()
+            })
 
+        # 5. Encode back to JPEG
+        _, buffer = cv2.imencode('.jpg', annotated_image)
+        return buffer.tobytes(), detections
 
-# Singleton instance for global access
-_detector: Optional[YOLODetector] = None
-
+# Singleton logic (keep existing)
+_detector = None
 def get_detector() -> YOLODetector:
-    """Get or create the global YOLO detector instance"""
     global _detector
     if _detector is None:
         _detector = YOLODetector()
     return _detector
-
-
-def detect_objects(image_bytes: bytes) -> List[Dict[str, Any]]:
-    """
-    Convenience function to detect objects in image bytes
-    
-    Args:
-        image_bytes: JPEG image data
-        
-    Returns:
-        List of detection dictionaries
-    """
-    detector = get_detector()
-    return detector.detect_from_bytes(image_bytes)
-
-
-if __name__ == "__main__":
-    # Test the detector
-    print("Testing YOLO detector...")
-    detector = YOLODetector()
-    print(f"Available classes: {len(detector.get_class_names())}")
-    print(f"First 10 classes: {detector.get_class_names()[:10]}")

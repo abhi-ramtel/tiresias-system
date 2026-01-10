@@ -12,6 +12,7 @@ from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from detection import get_detector
 
 app = FastAPI(
     title="Tiresias Edge Server",
@@ -193,22 +194,37 @@ async def video_stream(websocket: WebSocket):
     
     try:
         while True:
-            # Receive message (can be text or binary)
             message = await websocket.receive()
             
             if "bytes" in message:
-                # Binary frame data (JPEG image)
                 frame_data = message["bytes"]
-                frame_count += 1
-                fps_frame_count += 1
                 stats.total_frames_received += 1
                 
-                # Store latest frame for preview
-                stats.latest_frame = frame_data
+                # --- START AI PIPELINE ---
+                
+                # 1. Get the global detector
+                detector = get_detector()
+                
+                # 2. Process the frame (Detect & Paint)
+                # This returns the image with boxes AND the data list
+                annotated_frame, detections = detector.process_and_annotate(frame_data)
+                
+                # 3. Update the global view
+                # Now /view will show the boxes!
+                stats.latest_frame = annotated_frame
                 stats.latest_frame_time = datetime.now()
                 
-                # Calculate and display FPS every second
+                # --- END AI PIPELINE ---
+
+                # (Optional) Log significant detections
+                if len(detections) > 0:
+                    # Just print to console for now so you see it working
+                    labels = [d['class'] for d in detections]
+                    print(f"👀 Saw: {', '.join(labels)}")
+
+                # Performance Stats Update (Keep your existing FPS code here)
                 current_time = time.time()
+                # ... existing FPS logic ...
                 if current_time - last_fps_update >= 1.0:
                     fps = fps_frame_count / (current_time - last_fps_update)
                     print(f"📹 Receiving: {fps:.1f} FPS | Frame #{frame_count} | Size: {len(frame_data):,} bytes")
