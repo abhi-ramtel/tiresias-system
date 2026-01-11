@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import cv2
 import numpy as np
+import os
 from ultralytics import YOLO
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 from enum import Enum
 from dataclasses import dataclass
 
@@ -42,30 +43,33 @@ BACKGROUND_OBJECTS = {
 LARGE_OBJECTS = {'car', 'bus', 'truck', 'train', 'couch', 'bed', 'dining table', 'boat', 'airplane'}
 
 
+def select_fast_model() -> str:
+    override = os.getenv("TIRESIAS_FAST_MODEL")
+    if override:
+        return override
+    if os.getenv("TIRESIAS_USE_YOLOV10", "0") == "1" and os.path.exists("yolov10n.pt"):
+        return "yolov10n.pt"
+    return "yolov8n.pt"
+
+
 class YOLODetector:
-    def __init__(self, model_path: str = "yolov8n.pt", confidence_threshold: float = 0.5):
+    def __init__(self, model_path: str = None, confidence_threshold: float = 0.5):
+        model_path = model_path or select_fast_model()
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
+        print(f"✅ Fast lane model: {model_path}")
         
-    def process_and_annotate(self, image_bytes: bytes) -> Tuple[bytes, List[Dict[str, Any]]]:
-        """
-        Detects objects and returns:
-        1. JPEG bytes of the image with boxes drawn on it.
-        2. List of detection data (for logic).
-        """
-        # 1. Decode Bytes -> Numpy Image
+    def run_inference(self, image_bytes: bytes):
         nparr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
         if image is None:
-            return image_bytes, []
-
+            return None, None, (0, 0)
         results = self.model(image, conf=self.confidence_threshold, verbose=False)
-        result = results[0] # We only have 1 frame
+        result = results[0]
+        height, width = image.shape[:2]
+        return image, result, (width, height)
 
-        annotated_image = result.plot()
-
-        # 4. Extract Data (for safety logic later)
+    def detections_from_result(self, result) -> List[Dict[str, Any]]:
         detections = []
         for box in result.boxes:
             detections.append({
@@ -73,28 +77,27 @@ class YOLODetector:
                 "confidence": float(box.conf[0]),
                 "bbox": box.xyxy[0].tolist()
             })
+        return detections
 
+    def annotate_result(self, result) -> bytes:
+        annotated_image = result.plot()
         _, buffer = cv2.imencode('.jpg', annotated_image)
-        return buffer.tobytes(), detections
+        return buffer.tobytes()
 
 
 class NavigationDetector:
     """Enhanced detector for navigation assistance with hazard analysis"""
      
-    def __init__(self, model_path: str = "yolov8s.pt", confidence_threshold: float = 0.35):
+    def __init__(self, model_path: str = "yolov8n.pt", confidence_threshold: float = 0.35):
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
     
-    def analyse_frame(self, 
-                      image_bytes: bytes, 
-                      depth_data: Optional[bytes] = None) -> Dict[str, Any]:
+    def analyse_frame(self, image_bytes: bytes) -> Dict[str, Any]:
         """
         Analyse a frame for navigation assistance.
         
         Args:
             image_bytes: JPEG image data
-            depth_data: Optional LiDAR depth data (for future use)
-            
         Returns:
             Dict with detections, navigation summary, and warnings
         """
