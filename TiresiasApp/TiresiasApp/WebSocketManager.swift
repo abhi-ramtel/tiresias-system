@@ -16,6 +16,14 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var showError = false
     @Published var errorMessage = ""
     @Published var connectionMethod: String = "WiFi"
+    @Published var analysisSummary: String = ""
+    @Published var analysisWarnings: [String] = []
+    @Published var analysisLocation: String = ""
+    @Published var analysisAction: String = ""
+    @Published var analysisPath: String = ""
+    @Published var analysisObstacles: [String] = []
+    @Published var decisionAction: String = "CLEAR"
+    @Published var lastAlert: AlertMessage? = nil
     
     // var serverIP: String = "10.84.104.88" // Use your own IP here (Change it)
     var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "192.168.1.218" // add it to your env file
@@ -226,6 +234,14 @@ class WebSocketManager: NSObject, ObservableObject {
             self.updateStatus(.disconnected)
             self.framesSent = 0
             self.latencyMs = 0
+            self.analysisSummary = ""
+            self.analysisWarnings = []
+            self.analysisLocation = ""
+            self.analysisAction = ""
+            self.analysisPath = ""
+            self.analysisObstacles = []
+            self.decisionAction = "CLEAR"
+            self.lastAlert = nil
             self.connectionMethod = "WiFi"
         }
         print("🔴 Disconnected from server")
@@ -283,14 +299,32 @@ class WebSocketManager: NSObject, ObservableObject {
         
         // Start ping timer for latency measurement
         startPingTimer()
+
+        // Fallback: mark connected on successful ping if delegate doesn't fire
+        probeConnection()
     }
     
     // MARK: - Frame Sending
     
-    func sendFrame(_ imageData: Data) {
+    func sendFrame(_ imageData: Data, depth: DepthPacket?) {
         guard isConnected, let task = webSocketTask else { return }
         
-        let message = URLSessionWebSocketTask.Message.data(imageData)
+        let messageData: Data
+        if let depth = depth {
+            var payload = Data()
+            payload.append(contentsOf: [0x54, 0x53, 0x46, 0x31]) // "TSF1"
+            payload.appendUInt32(UInt32(imageData.count))
+            payload.appendUInt32(UInt32(depth.data.count))
+            payload.appendUInt16(UInt16(depth.width))
+            payload.appendUInt16(UInt16(depth.height))
+            payload.append(imageData)
+            payload.append(depth.data)
+            messageData = payload
+        } else {
+            messageData = imageData
+        }
+
+        let message = URLSessionWebSocketTask.Message.data(messageData)
         task.send(message) { [weak self] error in
             if let error = error {
                 print("❌ Send error: \(error.localizedDescription)")
@@ -299,6 +333,19 @@ class WebSocketManager: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self?.framesSent += 1
                 }
+            }
+        }
+    }
+
+    func sendJSON(_ payload: [String: Any]) {
+        guard isConnected, let task = webSocketTask else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else {
+            return
+        }
+        task.send(.string(text)) { error in
+            if let error = error {
+                print("❌ Send error: \(error.localizedDescription)")
             }
         }
     }
@@ -323,8 +370,7 @@ class WebSocketManager: NSObject, ObservableObject {
     private func handleMessage(_ message: URLSessionWebSocketTask.Message) {
         switch message {
         case .string(let text):
-            print("📨 Received: \(text)")
-            // Handle text responses from server (e.g., AI analysis results)
+            handleJSONMessage(text)
             
         case .data(let data):
             print("📦 Received data: \(data.count) bytes")
@@ -351,6 +397,18 @@ class WebSocketManager: NSObject, ObservableObject {
                 let latency = Int(Date().timeIntervalSince(pingTime) * 1000)
                 DispatchQueue.main.async {
                     self.latencyMs = latency
+                }
+            }
+        }
+    }
+
+    private func probeConnection() {
+        webSocketTask?.sendPing { [weak self] error in
+            guard let self = self else { return }
+            if error == nil && !self.isConnected {
+                DispatchQueue.main.async {
+                    self.isConnected = true
+                    self.updateStatus(.connected)
                 }
             }
         }
@@ -403,6 +461,7 @@ class WebSocketManager: NSObject, ObservableObject {
             self?.connect()
         }
     }
+
 }
 
 // MARK: - URLSessionWebSocketDelegate
@@ -448,5 +507,63 @@ extension WebSocketManager: URLSessionWebSocketDelegate {
             
             handleConnectionError(error.localizedDescription)
         }
+    }
+
+    private func handleJSONMessage(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = object["type"] as? String else {
+            print("📨 Received: \(text)")
+            return
+        }
+
+        if type == "analysis" {
+            let summary = object["summary"] as? String ?? ""
+            let warnings = object["warnings"] as? [String] ?? []
+            let location = object["location"] as? String ?? ""
+            let action = object["action"] as? String ?? "CLEAR"
+            let path = object["path"] as? String ?? ""
+            let obstacles = object["nearby_obstacles"] as? [String] ?? []
+            DispatchQueue.main.async { [weak self] in
+                self?.analysisSummary = summary
+                self?.analysisWarnings = warnings
+                self?.analysisLocation = location
+                self?.analysisAction = action
+                self?.analysisPath = path
+                self?.analysisObstacles = obstacles
+            }
+        } else if type == "decision" {
+            let action = object["action"] as? String ?? "CLEAR"
+            DispatchQueue.main.async { [weak self] in
+                self?.decisionAction = action
+            }
+        } else if type == "alert" {
+            let level = object["level"] as? String ?? "MEDIUM"
+            let text = object["text"] as? String ?? "Hazard detected"
+            let message = AlertMessage(level: level, text: text)
+            DispatchQueue.main.async { [weak self] in
+                self?.lastAlert = message
+            }
+        } else {
+            print("📨 Received: \(text)")
+        }
+    }
+}
+
+struct AlertMessage: Equatable {
+    let id = UUID()
+    let level: String
+    let text: String
+}
+
+private extension Data {
+    mutating func appendUInt32(_ value: UInt32) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendUInt16(_ value: UInt16) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
     }
 }

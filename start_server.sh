@@ -26,9 +26,13 @@ fi
 # Activate virtual environment
 source venv/bin/activate
 
-# Install/update dependencies
-echo "📦 Installing dependencies..."
-pip install -q -r ../requirements.txt
+# Install/update dependencies (skip by default to avoid heavy import delays)
+if [[ "$FORCE_INSTALL" == "1" ]]; then
+    echo "📦 Installing dependencies (FORCE_INSTALL=1)..."
+    pip install -r requirements.txt
+else
+    echo "📦 Skipping dependency install (set FORCE_INSTALL=1 to install)"
+fi
 
 # Firewall check
 echo "🔥 Checking firewall configuration..."

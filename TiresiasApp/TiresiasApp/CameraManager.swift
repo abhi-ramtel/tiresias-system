@@ -7,6 +7,37 @@
 
 import AVFoundation
 import UIKit
+import Vision
+import CoreML
+
+enum DepthMode: String, CaseIterable {
+    case off
+    case lidar
+    case monocular
+}
+
+struct DepthPacket {
+    let width: Int
+    let height: Int
+    let data: Data
+}
+
+struct DepthMap {
+    let width: Int
+    let height: Int
+    let values: [Float]
+    let isAbsolute: Bool
+    let minValue: Float
+    let maxValue: Float
+
+    func normalizedValue(at index: Int) -> Float {
+        let value = values[index]
+        if maxValue <= minValue {
+            return 0
+        }
+        return 1.0 - ((value - minValue) / (maxValue - minValue))
+    }
+}
 
 class CameraManager: NSObject, ObservableObject {
     @Published var isStreaming = false
@@ -15,6 +46,8 @@ class CameraManager: NSObject, ObservableObject {
     
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let depthOutput = AVCaptureDepthDataOutput()
+    private var synchronizer: AVCaptureDataOutputSynchronizer?
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let processingQueue = DispatchQueue(label: "camera.processing.queue", qos: .userInteractive)
     
@@ -23,11 +56,21 @@ class CameraManager: NSObject, ObservableObject {
     private var lastFPSUpdate = Date()
     
     // Callback for sending frames
-    var onFrameCaptured: ((Data) -> Void)?
+    var onFrameCaptured: ((Data, DepthPacket?) -> Void)?
+    var onDepthUpdated: ((DepthMap) -> Void)?
     
     // Configuration
-    private let targetFPS: Double = 30
-    private let jpegQuality: CGFloat = 0.25  // Low quality for speed, sufficient for AI
+    private var targetFPS: Double = 15
+    private var jpegQuality: CGFloat = 0.15
+    private var frameSendStride = 1
+    private var sendFrameCounter = 0
+    private var depthMode: DepthMode = .off
+    private var depthStride = 2
+    private var sendDepthCounter = 0
+    private var depthEnabled = false
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private var currentDevice: AVCaptureDevice?
+    private var monocularEstimator = MonocularDepthEstimator()
     
     override init() {
         super.init()
@@ -61,7 +104,6 @@ class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             
-            // Don't reconfigure if already set up
             guard self.session.inputs.isEmpty else {
                 print("⚠️ Session already configured")
                 return
@@ -69,21 +111,23 @@ class CameraManager: NSObject, ObservableObject {
             
             self.session.beginConfiguration()
             
-            // Set preset before adding inputs
-            if self.session.canSetSessionPreset(.hd1280x720) {
+            if self.session.canSetSessionPreset(.inputPriority) {
+                self.session.sessionPreset = .inputPriority
+            } else if self.session.canSetSessionPreset(.hd1280x720) {
                 self.session.sessionPreset = .hd1280x720
             } else {
                 self.session.sessionPreset = .medium
             }
             
-            // Setup camera input
-            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+            let lidarCamera = AVCaptureDevice.default(.builtInLiDARDepthCamera, for: .video, position: .back)
+            let camera = lidarCamera ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            guard let camera = camera else {
                 print("❌ No back camera found")
                 self.session.commitConfiguration()
                 return
             }
+            self.currentDevice = camera
             
-            // Create input
             let input: AVCaptureDeviceInput
             do {
                 input = try AVCaptureDeviceInput(device: camera)
@@ -101,11 +145,8 @@ class CameraManager: NSObject, ObservableObject {
                 return
             }
             
-            // Configure camera for optimal frame rate
             do {
                 try camera.lockForConfiguration()
-                
-                // Set frame rate if supported
                 let targetFrameDuration = CMTime(value: 1, timescale: CMTimeScale(self.targetFPS))
                 if let frameRateRange = camera.activeFormat.videoSupportedFrameRateRanges.first {
                     if frameRateRange.minFrameDuration <= targetFrameDuration && targetFrameDuration <= frameRateRange.maxFrameDuration {
@@ -114,7 +155,6 @@ class CameraManager: NSObject, ObservableObject {
                     }
                 }
                 
-                // Additional optimizations
                 if camera.isFocusModeSupported(.continuousAutoFocus) {
                     camera.focusMode = .continuousAutoFocus
                 }
@@ -130,12 +170,10 @@ class CameraManager: NSObject, ObservableObject {
                 print("⚠️ Could not configure camera: \(error)")
             }
             
-            // Setup video output
             self.videoOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
             ]
             self.videoOutput.alwaysDiscardsLateVideoFrames = true
-            self.videoOutput.setSampleBufferDelegate(self, queue: self.processingQueue)
             
             if self.session.canAddOutput(self.videoOutput) {
                 self.session.addOutput(self.videoOutput)
@@ -145,11 +183,50 @@ class CameraManager: NSObject, ObservableObject {
                 return
             }
             
-            // Set video orientation - must be done after adding output
-            if let connection = self.videoOutput.connection(with: .video) {
-                if connection.isVideoRotationAngleSupported(90) {
-                    connection.videoRotationAngle = 90  // Portrait orientation
+            if let connection = self.videoOutput.connection(with: .video),
+               connection.isVideoRotationAngleSupported(90) {
+                connection.videoRotationAngle = 90
+            }
+
+            if lidarCamera != nil {
+                let depthFormats = camera.activeFormat.supportedDepthDataFormats
+                if let depthFormat = depthFormats.first(where: {
+                    CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
+                }) {
+                    do {
+                        try camera.lockForConfiguration()
+                        camera.activeDepthDataFormat = depthFormat
+                        camera.unlockForConfiguration()
+                        self.depthEnabled = true
+                    } catch {
+                        print("⚠️ Could not enable depth format: \(error)")
+                    }
                 }
+            }
+
+            if !self.depthEnabled {
+                self.videoOutput.setSampleBufferDelegate(self, queue: self.processingQueue)
+            }
+
+            if self.depthEnabled {
+                self.depthOutput.isFilteringEnabled = true
+                if self.session.canAddOutput(self.depthOutput) {
+                    self.session.addOutput(self.depthOutput)
+                } else {
+                    self.depthEnabled = false
+                }
+            }
+
+            if self.depthEnabled,
+               let connection = self.depthOutput.connection(with: .depthData),
+               connection.isVideoRotationAngleSupported(90) {
+                connection.videoRotationAngle = 90
+            }
+
+            if self.depthEnabled {
+                self.synchronizer = AVCaptureDataOutputSynchronizer(dataOutputs: [self.videoOutput, self.depthOutput])
+                self.synchronizer?.setDelegate(self, queue: self.processingQueue)
+                self.videoOutput.setSampleBufferDelegate(nil, queue: nil)
             }
             
             self.session.commitConfiguration()
@@ -185,6 +262,7 @@ class CameraManager: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.isStreaming = true
             self.frameCount = 0
+            self.sendFrameCounter = 0
             self.lastFPSUpdate = Date()
         }
         print("📡 Streaming started")
@@ -212,6 +290,61 @@ class CameraManager: NSObject, ObservableObject {
             lastFPSUpdate = now
         }
     }
+    
+    private func shouldSendFrame() -> Bool {
+        sendFrameCounter = (sendFrameCounter + 1) % max(1, frameSendStride)
+        return sendFrameCounter == 0
+    }
+
+    private func shouldSendDepth() -> Bool {
+        sendDepthCounter = (sendDepthCounter + 1) % max(1, depthStride)
+        return sendDepthCounter == 0
+    }
+    
+    func applySettings(targetFPS: Double, preset: AVCaptureSession.Preset, jpegQuality: CGFloat, frameStride: Int, depthMode: DepthMode, depthStride: Int) {
+        let clampedFPS = max(5, min(targetFPS, 30))
+        let clampedQuality = max(0.1, min(jpegQuality, 0.7))
+        let clampedFrameStride = max(1, frameStride)
+        let clampedDepthStride = max(1, depthStride)
+        
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.targetFPS = clampedFPS
+            self.jpegQuality = clampedQuality
+            self.frameSendStride = clampedFrameStride
+            self.depthMode = depthMode
+            self.depthStride = clampedDepthStride
+            
+            self.session.beginConfiguration()
+            if self.session.canSetSessionPreset(preset) {
+                self.session.sessionPreset = preset
+            }
+            
+            if let camera = self.currentDevice {
+                do {
+                    try camera.lockForConfiguration()
+                    let targetFrameDuration = CMTime(value: 1, timescale: CMTimeScale(self.targetFPS))
+                    if let range = camera.activeFormat.videoSupportedFrameRateRanges.first,
+                       range.minFrameDuration <= targetFrameDuration && targetFrameDuration <= range.maxFrameDuration {
+                        camera.activeVideoMinFrameDuration = targetFrameDuration
+                        camera.activeVideoMaxFrameDuration = targetFrameDuration
+                    }
+                    camera.unlockForConfiguration()
+                } catch {
+                    print("⚠️ Could not update camera settings: \(error)")
+                }
+            }
+            self.session.commitConfiguration()
+        }
+    }
+
+    static func supportsLiDARDepth() -> Bool {
+        return AVCaptureDevice.default(.builtInLiDARDepthCamera, for: .video, position: .back) != nil
+    }
+
+    static func supportsMonocularDepth() -> Bool {
+        return Bundle.main.url(forResource: "DepthAnythingV2SmallF16", withExtension: "mlmodelc") != nil
+    }
 }
 
 // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
@@ -219,37 +352,284 @@ class CameraManager: NSObject, ObservableObject {
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard isStreaming else { return }
+        guard shouldSendFrame() else { return }
         
-        // Ensure we're working with a valid buffer
         guard CMSampleBufferIsValid(sampleBuffer),
               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             return
         }
         
-        // Lock the pixel buffer for reading
         CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)
-        defer {
-            CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly)
-        }
+        defer { CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly) }
         
-        // Convert to JPEG
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
             return
         }
         
         let uiImage = UIImage(cgImage: cgImage)
-        
         guard let jpegData = uiImage.jpegData(compressionQuality: jpegQuality) else {
             return
         }
         
-        // Update FPS counter
         updateFPS()
-        
-        // Send frame via callback
-        onFrameCaptured?(jpegData)
+        onFrameCaptured?(jpegData, nil)
+
+        if depthMode == .monocular, shouldSendDepth() {
+            monocularEstimator.estimateDepth(from: imageBuffer) { [weak self] depthMap in
+                guard let self = self, let depthMap = depthMap else { return }
+                self.onDepthUpdated?(depthMap)
+            }
+        }
+    }
+}
+
+// MARK: - AVCaptureDataOutputSynchronizerDelegate
+
+extension CameraManager: AVCaptureDataOutputSynchronizerDelegate {
+    func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer, didOutput synchronizedDataCollection: AVCaptureSynchronizedDataCollection) {
+        guard isStreaming else { return }
+        guard shouldSendFrame() else { return }
+
+        guard let syncedVideo = synchronizedDataCollection.synchronizedData(for: videoOutput) as? AVCaptureSynchronizedSampleBufferData,
+              !syncedVideo.sampleBufferWasDropped else {
+            return
+        }
+
+        let sampleBuffer = syncedVideo.sampleBuffer
+        guard CMSampleBufferIsValid(sampleBuffer),
+              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            return
+        }
+
+        CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly) }
+
+        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            return
+        }
+
+        let uiImage = UIImage(cgImage: cgImage)
+        guard let jpegData = uiImage.jpegData(compressionQuality: jpegQuality) else {
+            return
+        }
+
+        var depthPacket: DepthPacket? = nil
+        if depthMode == .lidar, depthEnabled, shouldSendDepth() {
+            if let syncedDepth = synchronizedDataCollection.synchronizedData(for: depthOutput) as? AVCaptureSynchronizedDepthData,
+               !syncedDepth.depthDataWasDropped {
+                let depthData = syncedDepth.depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+                depthPacket = sampleDepthPacket(depthData.depthDataMap)
+                if let depthMap = sampleDepthMap(depthData.depthDataMap) {
+                    onDepthUpdated?(depthMap)
+                }
+            }
+        } else if depthMode == .monocular, shouldSendDepth() {
+            monocularEstimator.estimateDepth(from: imageBuffer) { [weak self] depthMap in
+                guard let self = self, let depthMap = depthMap else { return }
+                self.onDepthUpdated?(depthMap)
+            }
+        }
+
+        updateFPS()
+        onFrameCaptured?(jpegData, depthPacket)
+    }
+}
+
+private extension CameraManager {
+    func sampleDepthPacket(_ depthBuffer: CVPixelBuffer) -> DepthPacket? {
+        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
+        let width = CVPixelBufferGetWidth(depthBuffer)
+        let height = CVPixelBufferGetHeight(depthBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthBuffer)
+        let stride = bytesPerRow / MemoryLayout<Float32>.size
+        let srcPtr = baseAddress.assumingMemoryBound(to: Float32.self)
+
+        let targetW = 128
+        let targetH = 96
+        var out = [UInt16](repeating: 0, count: targetW * targetH)
+
+        for y in 0..<targetH {
+            let srcY = min(height - 1, Int(Float(y) * Float(height) / Float(targetH)))
+            let rowPtr = srcPtr.advanced(by: srcY * stride)
+            for x in 0..<targetW {
+                let srcX = min(width - 1, Int(Float(x) * Float(width) / Float(targetW)))
+                let meters = rowPtr[srcX]
+                if meters.isFinite && meters > 0 {
+                    let mm = min(Int(meters * 1000.0), Int(UInt16.max))
+                    out[y * targetW + x] = UInt16(mm)
+                }
+            }
+        }
+
+        let data = out.withUnsafeBytes { Data($0) }
+        return DepthPacket(width: targetW, height: targetH, data: data)
+    }
+
+    func sampleDepthMap(_ depthBuffer: CVPixelBuffer) -> DepthMap? {
+        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
+        let width = CVPixelBufferGetWidth(depthBuffer)
+        let height = CVPixelBufferGetHeight(depthBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthBuffer)
+        let stride = bytesPerRow / MemoryLayout<Float32>.size
+        let srcPtr = baseAddress.assumingMemoryBound(to: Float32.self)
+
+        var values = [Float](repeating: 0, count: width * height)
+        var minV: Float = .greatestFiniteMagnitude
+        var maxV: Float = 0
+        for y in 0..<height {
+            let rowPtr = srcPtr.advanced(by: y * stride)
+            for x in 0..<width {
+                let meters = rowPtr[x]
+                let idx = y * width + x
+                if meters.isFinite && meters > 0 {
+                    values[idx] = meters
+                    minV = min(minV, meters)
+                    maxV = max(maxV, meters)
+                }
+            }
+        }
+        if minV == .greatestFiniteMagnitude || maxV <= minV {
+            return nil
+        }
+        return DepthMap(width: width, height: height, values: values, isAbsolute: true, minValue: minV, maxValue: maxV)
+    }
+}
+
+private class MonocularDepthEstimator {
+    private let model: VNCoreMLModel?
+    private let request: VNCoreMLRequest?
+    private let queue = DispatchQueue(label: "depth.monocular.queue", qos: .userInitiated)
+    private var isBusy = false
+
+    init() {
+        if let url = Bundle.main.url(forResource: "DepthAnythingV2SmallF16", withExtension: "mlmodelc"),
+           let mlModel = try? MLModel(contentsOf: url),
+           let vnModel = try? VNCoreMLModel(for: mlModel) {
+            self.model = vnModel
+            let req = VNCoreMLRequest(model: vnModel)
+            req.imageCropAndScaleOption = .scaleFill
+            self.request = req
+        } else {
+            self.model = nil
+            self.request = nil
+        }
+    }
+
+    func estimateDepth(from pixelBuffer: CVPixelBuffer, completion: @escaping (DepthMap?) -> Void) {
+        guard let request = request else {
+            completion(nil)
+            return
+        }
+        guard !isBusy else {
+            completion(nil)
+            return
+        }
+        isBusy = true
+        queue.async { [weak self] in
+            defer {
+                self?.isBusy = false
+            }
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                completion(nil)
+                return
+            }
+            if let observation = request.results?.first as? VNCoreMLFeatureValueObservation,
+               let multiArray = observation.featureValue.multiArrayValue {
+                completion(DepthMap.from(multiArray: multiArray))
+                return
+            }
+            if let observation = request.results?.first as? VNPixelBufferObservation {
+                completion(DepthMap.from(pixelBuffer: observation.pixelBuffer))
+                return
+            }
+            completion(nil)
+        }
+    }
+}
+
+private extension DepthMap {
+    static func from(multiArray: MLMultiArray) -> DepthMap? {
+        let shape = multiArray.shape.map { $0.intValue }
+        let stride = multiArray.strides.map { $0.intValue }
+        let width: Int
+        let height: Int
+        if shape.count == 2 {
+            height = shape[0]
+            width = shape[1]
+        } else if shape.count == 3 {
+            height = shape[1]
+            width = shape[2]
+        } else {
+            return nil
+        }
+
+        var values = [Float](repeating: 0, count: width * height)
+        var minV: Float = .greatestFiniteMagnitude
+        var maxV: Float = -.greatestFiniteMagnitude
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let index: Int
+                if shape.count == 2 {
+                    index = y * stride[0] + x * stride[1]
+                } else {
+                    index = 0 * stride[0] + y * stride[1] + x * stride[2]
+                }
+                let value = multiArray[index].floatValue
+                let idx = y * width + x
+                values[idx] = value
+                minV = min(minV, value)
+                maxV = max(maxV, value)
+            }
+        }
+
+        if maxV <= minV {
+            return nil
+        }
+        return DepthMap(width: width, height: height, values: values, isAbsolute: false, minValue: minV, maxValue: maxV)
+    }
+
+    static func from(pixelBuffer: CVPixelBuffer) -> DepthMap? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let stride = bytesPerRow / MemoryLayout<Float32>.size
+        let srcPtr = baseAddress.assumingMemoryBound(to: Float32.self)
+
+        var values = [Float](repeating: 0, count: width * height)
+        var minV: Float = .greatestFiniteMagnitude
+        var maxV: Float = -.greatestFiniteMagnitude
+
+        for y in 0..<height {
+            let rowPtr = srcPtr.advanced(by: y * stride)
+            for x in 0..<width {
+                let value = rowPtr[x]
+                let idx = y * width + x
+                values[idx] = value
+                minV = min(minV, value)
+                maxV = max(maxV, value)
+            }
+        }
+
+        if maxV <= minV {
+            return nil
+        }
+        return DepthMap(width: width, height: height, values: values, isAbsolute: false, minValue: minV, maxValue: maxV)
     }
 }
