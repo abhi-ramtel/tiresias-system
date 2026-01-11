@@ -26,6 +26,17 @@ struct DepthMap {
     let width: Int
     let height: Int
     let values: [Float]
+    let isAbsolute: Bool
+    let minValue: Float
+    let maxValue: Float
+
+    func normalizedValue(at index: Int) -> Float {
+        let value = values[index]
+        if maxValue <= minValue {
+            return 0
+        }
+        return 1.0 - ((value - minValue) / (maxValue - minValue))
+    }
 }
 
 class CameraManager: NSObject, ObservableObject {
@@ -488,9 +499,7 @@ private extension CameraManager {
         if minV == .greatestFiniteMagnitude || maxV <= minV {
             return nil
         }
-        let range = maxV - minV
-        let normalized = values.map { $0 > 0 ? (1.0 - (($0 - minV) / range)) : 0 }
-        return DepthMap(width: width, height: height, values: normalized)
+        return DepthMap(width: width, height: height, values: values, isAbsolute: true, minValue: minV, maxValue: maxV)
     }
 }
 
@@ -588,9 +597,7 @@ private extension DepthMap {
         if maxV <= minV {
             return nil
         }
-        let range = maxV - minV
-        let normalized = values.map { 1.0 - (($0 - minV) / range) }
-        return DepthMap(width: width, height: height, values: normalized)
+        return DepthMap(width: width, height: height, values: values, isAbsolute: false, minValue: minV, maxValue: maxV)
     }
 
     static func from(pixelBuffer: CVPixelBuffer) -> DepthMap? {
@@ -623,8 +630,6 @@ private extension DepthMap {
         if maxV <= minV {
             return nil
         }
-        let range = maxV - minV
-        let normalized = values.map { 1.0 - (($0 - minV) / range) }
-        return DepthMap(width: width, height: height, values: normalized)
+        return DepthMap(width: width, height: height, values: values, isAbsolute: false, minValue: minV, maxValue: maxV)
     }
 }

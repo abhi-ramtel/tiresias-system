@@ -16,6 +16,7 @@ struct ContentView: View {
     @StateObject private var webSocketManager = WebSocketManager()
     @StateObject private var feedbackManager = AlertFeedbackManager()
     @StateObject private var locationManager = LocationManager()
+    @StateObject private var avoidanceManager = LocalAvoidanceManager()
     @State private var depthMap: DepthMap? = nil
     
     // @AppStorage("serverIP") private var serverIP: String = "10.84.104.88" // Change to you ip
@@ -28,6 +29,8 @@ struct ContentView: View {
     @AppStorage("settings_depth_mode") private var depthModeSetting: String = DepthMode.off.rawValue
     @AppStorage("settings_haptics_enabled") private var hapticsEnabled: Bool = true
     @AppStorage("settings_alerts_enabled") private var alertsEnabled: Bool = false
+    @AppStorage("settings_local_avoidance") private var localAvoidanceEnabled: Bool = true
+    @AppStorage("settings_critical_distance_m") private var criticalDistanceSetting: Double = 1.8
     @State private var showingSettings = false
     
     var body: some View {
@@ -80,7 +83,10 @@ struct ContentView: View {
                 AnalysisOverlayView(
                     summary: webSocketManager.analysisSummary,
                     warnings: webSocketManager.analysisWarnings,
-                    location: webSocketManager.analysisLocation
+                    location: webSocketManager.analysisLocation,
+                    action: webSocketManager.analysisAction,
+                    path: webSocketManager.analysisPath,
+                    obstacles: webSocketManager.analysisObstacles
                 )
                     .padding(.bottom, 8)
 
@@ -89,16 +95,15 @@ struct ContentView: View {
                         .padding(.bottom, 8)
                 }
                 
-                // Stats overlay
+                // Stats overlay (small text)
                 if webSocketManager.isConnected {
-                    HStack(spacing: 20) {
-                        StatView(title: "FPS", value: "\(cameraManager.currentFPS)")
-                        StatView(title: "Frames", value: "\(webSocketManager.framesSent)")
-                        StatView(title: "Latency", value: "\(webSocketManager.latencyMs)ms")
-                    }
-                    .padding()
-                    .background(Color.black.opacity(0.6))
-                    .cornerRadius(12)
+                    Text("FPS \(cameraManager.currentFPS)  •  Frames \(webSocketManager.framesSent)  •  \(webSocketManager.latencyMs)ms")
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.8))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.black.opacity(0.4))
+                        .cornerRadius(10)
                 }
                 
                 // Control buttons
@@ -159,6 +164,14 @@ struct ContentView: View {
             cameraManager.onDepthUpdated = { depth in
                 DispatchQueue.main.async {
                     depthMap = depth
+                    if localAvoidanceEnabled {
+                        if let alert = avoidanceManager.process(depthMap: depth, criticalDistance: criticalDistanceSetting) {
+                            webSocketManager.lastAlert = alert
+                            if hapticsEnabled {
+                                feedbackManager.play(alert: alert)
+                            }
+                        }
+                    }
                 }
             }
             locationManager.onLocationUpdate = { location in
@@ -189,6 +202,8 @@ struct ContentView: View {
                 depthMode: $depthModeSetting,
                 hapticsEnabled: $hapticsEnabled,
                 alertsEnabled: $alertsEnabled,
+                localAvoidanceEnabled: $localAvoidanceEnabled,
+                criticalDistance: $criticalDistanceSetting,
                 onSave: {
                     webSocketManager.serverIP = serverIP
                     applyPerformanceSettings()
@@ -307,6 +322,8 @@ struct SettingsView: View {
     @Binding var depthMode: String
     @Binding var hapticsEnabled: Bool
     @Binding var alertsEnabled: Bool
+    @Binding var localAvoidanceEnabled: Bool
+    @Binding var criticalDistance: Double
     let onSave: () -> Void
     @Environment(\.dismiss) var dismiss
     
@@ -364,6 +381,18 @@ struct SettingsView: View {
                     Toggle("Haptics", isOn: $hapticsEnabled)
                     Toggle("On-Screen Alerts", isOn: $alertsEnabled)
                 }
+
+                Section(header: Text("Local Safety")) {
+                    Toggle("Local Obstacle Avoidance", isOn: $localAvoidanceEnabled)
+                    if localAvoidanceEnabled {
+                        HStack {
+                            Text("Critical Distance")
+                            Spacer()
+                            Text(String(format: "%.1fm", criticalDistance))
+                        }
+                        Slider(value: $criticalDistance, in: 0.8...3.0, step: 0.1)
+                    }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -386,12 +415,21 @@ struct AnalysisOverlayView: View {
     let summary: String
     let warnings: [String]
     let location: String
+    let action: String
+    let path: String
+    let obstacles: [String]
 
     var body: some View {
         if summary.isEmpty && warnings.isEmpty {
             EmptyView()
         } else {
             VStack(alignment: .leading, spacing: 8) {
+                ActionPillView(action: action)
+                if !path.isEmpty {
+                    Text("Path: \(path)")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                }
                 if !summary.isEmpty {
                     Text(summary)
                         .font(.headline)
@@ -407,12 +445,42 @@ struct AnalysisOverlayView: View {
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.9))
                 }
+                if !obstacles.isEmpty {
+                    Text("Caution: \(obstacles.prefix(3).joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.8))
+                }
             }
             .padding(12)
             .background(.ultraThinMaterial)
             .cornerRadius(12)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.horizontal)
+        }
+    }
+}
+
+struct ActionPillView: View {
+    let action: String
+
+    var body: some View {
+        HStack {
+            Text(action)
+                .font(.caption2)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(colorForAction(action))
+                .foregroundColor(.white)
+                .cornerRadius(8)
+            Spacer()
+        }
+    }
+
+    private func colorForAction(_ action: String) -> Color {
+        switch action {
+        case "STOP": return .red
+        case "CAUTION": return .orange
+        default: return .green
         }
     }
 }
@@ -434,7 +502,7 @@ struct DepthMeshView: View {
                     var path = Path()
                     for col in 0..<depthMap.width {
                         let idx = row * depthMap.width + col
-                        let depth = depthMap.values[idx]
+                        let depth = depthMap.normalizedValue(at: idx)
                         let x = CGFloat(col) * scaleX
                         let y = CGFloat(row) * scaleY - (CGFloat(depth) * amplitude)
                         if col == 0 {
@@ -451,7 +519,7 @@ struct DepthMeshView: View {
                     var path = Path()
                     for row in 0..<depthMap.height {
                         let idx = row * depthMap.width + col
-                        let depth = depthMap.values[idx]
+                        let depth = depthMap.normalizedValue(at: idx)
                         let x = CGFloat(col) * scaleX
                         let y = CGFloat(row) * scaleY - (CGFloat(depth) * amplitude)
                         if row == 0 {
@@ -568,6 +636,71 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         print("⚠️ Location error: \(error.localizedDescription)")
+    }
+}
+
+class LocalAvoidanceManager: ObservableObject {
+    private var lastAlertAt = Date.distantPast
+    private let minInterval: TimeInterval = 1.5
+
+    func process(depthMap: DepthMap, criticalDistance: Double) -> AlertMessage? {
+        let now = Date()
+        if now.timeIntervalSince(lastAlertAt) < minInterval {
+            return nil
+        }
+        if depthMap.isAbsolute {
+            let minDistance = minDepth(in: depthMap)
+            if minDistance > 0 && minDistance <= Float(criticalDistance) {
+                lastAlertAt = now
+                return AlertMessage(level: "CRITICAL", text: "STOP")
+            }
+        } else {
+            let nearScore = nearScore(in: depthMap)
+            if nearScore >= 0.82 {
+                lastAlertAt = now
+                return AlertMessage(level: "HIGH", text: "Obstacle ahead")
+            }
+        }
+        return nil
+    }
+
+    private func minDepth(in depthMap: DepthMap) -> Float {
+        let w = depthMap.width
+        let h = depthMap.height
+        if w == 0 || h == 0 { return 0 }
+        let cx = w / 2
+        let cy = h / 2
+        let radius = max(2, min(w, h) / 12)
+        var minVal: Float = .greatestFiniteMagnitude
+        for y in max(0, cy - radius)...min(h - 1, cy + radius) {
+            for x in max(0, cx - radius)...min(w - 1, cx + radius) {
+                let value = depthMap.values[y * w + x]
+                if value > 0 {
+                    minVal = min(minVal, value)
+                }
+            }
+        }
+        return minVal == .greatestFiniteMagnitude ? 0 : minVal
+    }
+
+    private func nearScore(in depthMap: DepthMap) -> Float {
+        let w = depthMap.width
+        let h = depthMap.height
+        if w == 0 || h == 0 { return 0 }
+        let cx = w / 2
+        let cy = h / 2
+        let radius = max(2, min(w, h) / 10)
+        var values: [Float] = []
+        values.reserveCapacity((radius * 2 + 1) * (radius * 2 + 1))
+        for y in max(0, cy - radius)...min(h - 1, cy + radius) {
+            for x in max(0, cx - radius)...min(w - 1, cx + radius) {
+                let idx = y * w + x
+                values.append(depthMap.normalizedValue(at: idx))
+            }
+        }
+        if values.isEmpty { return 0 }
+        values.sort()
+        return values[values.count / 2]
     }
 }
 

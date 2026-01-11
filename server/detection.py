@@ -24,10 +24,11 @@ MOVING_OBJECTS = {
 
 # Objects that are static obstacles (trip/collision hazards)
 OBSTACLE_OBJECTS = {
-    'fire hydrant', 'stop sign', 'parking meter', 'bench', 'chair', 
+    'fire hydrant', 'stop sign', 'parking meter', 'bench', 'chair',
     'potted plant', 'suitcase', 'backpack', 'umbrella', 'handbag',
     'skateboard', 'surfboard', 'skis', 'snowboard', 'sports ball',
-    'bottle', 'cup', 'bowl', 'vase', 'scissors'
+    'bottle', 'cup', 'bowl', 'vase', 'scissors',
+    'bed', 'couch', 'dining table', 'tv', 'door', 'window', 'wall', 'table'
 }
 
 # Objects that are typically not in walking path (furniture, mounted items)
@@ -85,12 +86,18 @@ class YOLODetector:
         return buffer.tobytes()
 
 
+def select_nav_model() -> str:
+    return os.getenv("TIRESIAS_NAV_MODEL", "yolov8s.pt")
+
+
 class NavigationDetector:
     """Enhanced detector for navigation assistance with hazard analysis"""
      
-    def __init__(self, model_path: str = "yolov8n.pt", confidence_threshold: float = 0.35):
+    def __init__(self, model_path: str = None, confidence_threshold: float = 0.35):
+        model_path = model_path or select_nav_model()
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
+        print(f"✅ Slow lane model: {model_path}")
     
     def analyse_frame(self, image_bytes: bytes) -> Dict[str, Any]:
         """
@@ -155,14 +162,20 @@ class NavigationDetector:
         ))
         
         # Generate navigation summary
-        summary = self._generate_navigation_summary(detections)
+        path = self._detect_path(detections, width, height)
+        summary = self._generate_navigation_summary(detections, path)
         warnings = self._generate_warnings(detections)
+        action = self._generate_action(detections)
         
         return {
             "detections": detections,
             "count": len(detections),
             "summary": summary,
             "warnings": warnings,
+            "action": action,
+            "path": path["direction"],
+            "path_reason": path["reason"],
+            "nearby_obstacles": path["obstacles"],
             "image_size": {"width": width, "height": height}
         }
     
@@ -249,10 +262,10 @@ class NavigationDetector:
         
         return warnings[:3]  # Top 3 warnings
     
-    def _generate_navigation_summary(self, detections: List[Dict]) -> str:
+    def _generate_navigation_summary(self, detections: List[Dict], path: Dict[str, Any]) -> str:
         """Generate human-readable navigation summary"""
         if not detections:
-            return "Path appears clear. No obstacles detected."
+            return f"Path appears clear. {path['direction']} looks best."
         
         parts = []
         
@@ -271,7 +284,50 @@ class NavigationDetector:
         if len(detections) > 5:
             parts.append(f"Busy area with {len(detections)} objects")
         
+        if path["direction"]:
+            parts.append(f"Best path: {path['direction']}")
         return ". ".join(parts) if parts else "Environment scanned."
+
+    def _detect_path(self, detections: List[Dict[str, Any]], width: int, height: int) -> Dict[str, Any]:
+        if width <= 0 or height <= 0:
+            return {"direction": "center", "reason": "default", "obstacles": []}
+
+        lanes = {"left": 0.0, "center": 0.0, "right": 0.0}
+        obstacles = []
+
+        for det in detections:
+            x1, y1, w, h = det["bbox"]
+            x2 = x1 + w
+            y2 = y1 + h
+            area_ratio = max(0.0, (w * h) / float(width * height))
+            if det["hazard_priority"] <= 2 or area_ratio > 0.06:
+                center_x = x1 + w / 2
+                if center_x < width / 3:
+                    lane = "left"
+                elif center_x < 2 * width / 3:
+                    lane = "center"
+                else:
+                    lane = "right"
+                lanes[lane] += area_ratio
+                obstacles.append(f"{det['label']} on {det['position']}")
+
+        best_lane = min(lanes, key=lanes.get)
+        reason = "clearance"
+        return {
+            "direction": best_lane,
+            "reason": reason,
+            "obstacles": obstacles[:5]
+        }
+
+    def _generate_action(self, detections: List[Dict]) -> str:
+        if not detections:
+            return "CLEAR"
+        top = detections[0]
+        if top["hazard_priority"] == 1:
+            return "STOP"
+        if top["hazard_priority"] == 2:
+            return "CAUTION"
+        return "CLEAR"
     
 # Singleton instances
 _detector = None

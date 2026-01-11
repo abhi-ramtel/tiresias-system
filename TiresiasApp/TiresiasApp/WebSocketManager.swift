@@ -19,6 +19,9 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var analysisSummary: String = ""
     @Published var analysisWarnings: [String] = []
     @Published var analysisLocation: String = ""
+    @Published var analysisAction: String = ""
+    @Published var analysisPath: String = ""
+    @Published var analysisObstacles: [String] = []
     @Published var lastAlert: AlertMessage? = nil
     
     // var serverIP: String = "10.84.104.88" // Use your own IP here (Change it)
@@ -233,6 +236,9 @@ class WebSocketManager: NSObject, ObservableObject {
             self.analysisSummary = ""
             self.analysisWarnings = []
             self.analysisLocation = ""
+            self.analysisAction = ""
+            self.analysisPath = ""
+            self.analysisObstacles = []
             self.lastAlert = nil
             self.connectionMethod = "WiFi"
         }
@@ -498,10 +504,16 @@ extension WebSocketManager: URLSessionWebSocketDelegate {
             let summary = object["summary"] as? String ?? ""
             let warnings = object["warnings"] as? [String] ?? []
             let location = object["location"] as? String ?? ""
+            let action = object["action"] as? String ?? "CLEAR"
+            let path = object["path"] as? String ?? ""
+            let obstacles = object["nearby_obstacles"] as? [String] ?? []
             DispatchQueue.main.async { [weak self] in
                 self?.analysisSummary = summary
                 self?.analysisWarnings = warnings
                 self?.analysisLocation = location
+                self?.analysisAction = action
+                self?.analysisPath = path
+                self?.analysisObstacles = obstacles
             }
         } else if type == "alert" {
             let level = object["level"] as? String ?? "MEDIUM"

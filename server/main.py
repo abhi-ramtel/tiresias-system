@@ -181,6 +181,8 @@ def classify_fast_alert(detections, image_size):
         "timestamp": datetime.now().isoformat()
     }
 
+_geocode_cache = {}
+
 async def reverse_geocode(lat: float, lon: float) -> str:
     if not lat or not lon:
         return "Unknown location"
@@ -188,6 +190,9 @@ async def reverse_geocode(lat: float, lon: float) -> str:
         return "Unknown location"
     if not bool(int(os.getenv("TIRESIAS_GEOCODE", "0"))):
         return "Unknown location"
+    key = (round(lat, 4), round(lon, 4))
+    if key in _geocode_cache:
+        return _geocode_cache[key]
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
@@ -198,7 +203,9 @@ async def reverse_geocode(lat: float, lon: float) -> str:
             if response.status_code != 200:
                 return "Unknown location"
             data = response.json()
-            return data.get("display_name", "Unknown location")
+            value = data.get("display_name", "Unknown location")
+            _geocode_cache[key] = value
+            return value
     except Exception:
         return "Unknown location"
 
@@ -414,7 +421,7 @@ async def video_stream(websocket: WebSocket):
     fps_frame_count = 0
     
     fast_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
-    slow_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    latest_frame: Optional[bytes] = None
     stop_event = asyncio.Event()
 
     async def fast_lane_worker():
@@ -457,21 +464,27 @@ async def video_stream(websocket: WebSocket):
         detector = get_navigation_detector()
         last_run = 0.0
         while not stop_event.is_set():
-            frame_data, _ = await slow_queue.get()
+            await asyncio.sleep(0.05)
             now = time.time()
             if now - last_run < SLOW_LANE_INTERVAL_S:
                 continue
-            result = detector.analyse_frame(frame_data)
+            if latest_frame is None:
+                continue
+            result = detector.analyse_frame(latest_frame)
             if "error" not in result:
                 gps = stats.last_gps or {}
                 location_text = ""
                 if gps:
                     location_text = await reverse_geocode(gps.get("lat", 0.0), gps.get("lon", 0.0))
+                action = result.get("action", "CLEAR")
                 payload = {
                     "type": "analysis",
                     "summary": result.get("summary", ""),
                     "warnings": result.get("warnings", []),
                     "location": location_text,
+                    "action": action,
+                    "path": result.get("path", ""),
+                    "nearby_obstacles": result.get("nearby_obstacles", []),
                     "timestamp": datetime.now().isoformat()
                 }
                 try:
@@ -501,6 +514,8 @@ async def video_stream(websocket: WebSocket):
                     except asyncio.QueueEmpty:
                         pass
                 fast_queue.put_nowait((frame_data, depth_meta))
+
+                latest_frame = frame_data
 
                 frame_buffer.append({
                     "timestamp": datetime.now().isoformat(),
@@ -539,13 +554,7 @@ async def video_stream(websocket: WebSocket):
                     }
                 elif data.get("type") == "analyze_now":
                     if frame_buffer:
-                        latest = frame_buffer[-1]["frame"]
-                        if slow_queue.full():
-                            try:
-                                slow_queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                pass
-                        slow_queue.put_nowait((latest, None))
+                        latest_frame = frame_buffer[-1]["frame"]
                 else:
                     print(f"📨 Text message: {text_data}")
                 
