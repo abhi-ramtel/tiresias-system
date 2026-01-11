@@ -11,7 +11,7 @@ class YOLODetector:
         self.confidence_threshold = confidence_threshold
         print(f"✅ YOLO initialized. Device: {self.model.device}")
         
-    def process_and_annotate(self, image_bytes: bytes) -> Tuple[bytes, List[Dict[str, Any]]]:
+    def process_and_annotate(self, image_bytes: bytes) -> Tuple[bytes, List[Dict[str, Any]], Tuple[int, int]]:
         """
         Detects objects and returns:
         1. JPEG bytes of the image with boxes drawn on it.
@@ -22,7 +22,7 @@ class YOLODetector:
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
-            return image_bytes, []
+            return image_bytes, [], (0, 0)
 
         # 2. Run Inference
         results = self.model(image, conf=self.confidence_threshold, verbose=False)
@@ -43,7 +43,8 @@ class YOLODetector:
 
         # 5. Encode back to JPEG
         _, buffer = cv2.imencode('.jpg', annotated_image)
-        return buffer.tobytes(), detections
+        height, width = image.shape[:2]
+        return buffer.tobytes(), detections, (width, height)
 
 # Singleton logic (keep existing)
 _detector = None

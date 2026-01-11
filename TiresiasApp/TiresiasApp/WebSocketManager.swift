@@ -13,6 +13,7 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var connectionStatus: ConnectionStatus = .disconnected
     @Published var framesSent: Int = 0
     @Published var latencyMs: Int = 0
+    @Published var depthOverlay: DepthOverlayData? = nil
     @Published var showError = false
     @Published var errorMessage = ""
     @Published var connectionMethod: String = "WiFi"
@@ -226,6 +227,7 @@ class WebSocketManager: NSObject, ObservableObject {
             self.updateStatus(.disconnected)
             self.framesSent = 0
             self.latencyMs = 0
+            self.depthOverlay = nil
             self.connectionMethod = "WiFi"
         }
         print("🔴 Disconnected from server")
@@ -287,10 +289,25 @@ class WebSocketManager: NSObject, ObservableObject {
     
     // MARK: - Frame Sending
     
-    func sendFrame(_ imageData: Data) {
+    func sendFrame(_ imageData: Data, depth: DepthPacket?) {
         guard isConnected, let task = webSocketTask else { return }
         
-        let message = URLSessionWebSocketTask.Message.data(imageData)
+        let messageData: Data
+        if let depth = depth {
+            var payload = Data()
+            payload.append(contentsOf: [0x54, 0x53, 0x46, 0x31]) // "TSF1"
+            payload.appendUInt32(UInt32(imageData.count))
+            payload.appendUInt32(UInt32(depth.data.count))
+            payload.appendUInt16(UInt16(depth.width))
+            payload.appendUInt16(UInt16(depth.height))
+            payload.append(imageData)
+            payload.append(depth.data)
+            messageData = payload
+        } else {
+            messageData = imageData
+        }
+
+        let message = URLSessionWebSocketTask.Message.data(messageData)
         task.send(message) { [weak self] error in
             if let error = error {
                 print("❌ Send error: \(error.localizedDescription)")
@@ -323,8 +340,17 @@ class WebSocketManager: NSObject, ObservableObject {
     private func handleMessage(_ message: URLSessionWebSocketTask.Message) {
         switch message {
         case .string(let text):
-            print("📨 Received: \(text)")
-            // Handle text responses from server (e.g., AI analysis results)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                if let payload = self?.decodeDepthPayload(text) {
+                    DispatchQueue.main.async {
+                        self?.depthOverlay = payload
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        print("📨 Received: \(text)")
+                    }
+                }
+            }
             
         case .data(let data):
             print("📦 Received data: \(data.count) bytes")
@@ -402,6 +428,70 @@ class WebSocketManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + reconnectDelay) { [weak self] in
             self?.connect()
         }
+    }
+
+    private func decodeDepthPayload(_ text: String) -> DepthOverlayData? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        let decoder = JSONDecoder()
+        guard let payload = try? decoder.decode(DepthPayload.self, from: data),
+              payload.type == "depth" else {
+            return nil
+        }
+        guard let raw = Data(base64Encoded: payload.data) else { return nil }
+        let expectedBytes = payload.width * payload.height * MemoryLayout<UInt16>.size
+        guard raw.count >= expectedBytes else {
+            print("⚠️ Depth payload too small: \(raw.count) < \(expectedBytes)")
+            return nil
+        }
+
+        let values: [UInt16] = raw.withUnsafeBytes { buffer in
+            let ptr = buffer.bindMemory(to: UInt16.self)
+            return Array(ptr.prefix(payload.width * payload.height))
+        }
+        let nonZero = values.filter { $0 > 0 }
+        if nonZero.isEmpty {
+            print("⚠️ Depth payload decoded but all values are zero")
+        } else {
+            let minV = nonZero.min() ?? 0
+            let maxV = nonZero.max() ?? 0
+            print("✅ Depth payload: \(payload.width)x\(payload.height) nonZero=\(nonZero.count) min=\(minV)mm max=\(maxV)mm")
+        }
+        return DepthOverlayData(
+            width: payload.width,
+            height: payload.height,
+            frameWidth: payload.frameWidth,
+            frameHeight: payload.frameHeight,
+            values: values
+        )
+    }
+}
+
+struct DepthPayload: Decodable {
+    let type: String
+    let width: Int
+    let height: Int
+    let frameWidth: Int
+    let frameHeight: Int
+    let data: String
+}
+
+struct DepthOverlayData {
+    let width: Int
+    let height: Int
+    let frameWidth: Int
+    let frameHeight: Int
+    let values: [UInt16]
+}
+
+private extension Data {
+    mutating func appendUInt32(_ value: UInt32) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendUInt16(_ value: UInt16) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
     }
 }
 

@@ -22,6 +22,12 @@ struct ContentView: View {
             // Camera Preview
             CameraPreviewView(session: cameraManager.session)
                 .ignoresSafeArea()
+
+            if let depth = webSocketManager.depthOverlay {
+                DepthMeshView(depth: depth)
+                    .ignoresSafeArea()
+                    .opacity(0.45)
+            }
             
             // Overlay UI
             VStack {
@@ -106,9 +112,12 @@ struct ContentView: View {
         }
         .onAppear {
             cameraManager.checkPermissions()
-            cameraManager.onFrameCaptured = { imageData in
-                webSocketManager.sendFrame(imageData)
+            cameraManager.onFrameCaptured = { imageData, depthPacket in
+                webSocketManager.sendFrame(imageData, depth: depthPacket)
             }
+        }
+        .onChange(of: webSocketManager.depthOverlay != nil) { hasDepth in
+            print("ℹ️ Depth overlay active: \(hasDepth)")
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView(
@@ -204,6 +213,58 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+}
+
+struct DepthMeshView: View {
+    let depth: DepthOverlayData
+
+    var body: some View {
+        GeometryReader { geo in
+            Canvas { context, size in
+                guard depth.width > 0, depth.height > 0 else { return }
+                guard let (minV, maxV) = depthMinMax(), maxV > minV else { return }
+
+                let step = 2
+                let cellWidth = size.width / CGFloat(depth.width)
+                let cellHeight = size.height / CGFloat(depth.height)
+                let minF = CGFloat(minV)
+                let maxF = CGFloat(maxV)
+
+                for y in stride(from: 0, to: depth.height, by: step) {
+                    for x in stride(from: 0, to: depth.width, by: step) {
+                        let idx = y * depth.width + x
+                        let value = depth.values[idx]
+                        if value == 0 { continue }
+                        let t = (CGFloat(value) - minF) / (maxF - minF)
+                        let color = depthColor(t)
+                        let rect = CGRect(
+                            x: CGFloat(x) * cellWidth,
+                            y: CGFloat(y) * cellHeight,
+                            width: cellWidth * CGFloat(step),
+                            height: cellHeight * CGFloat(step)
+                        )
+                        context.fill(Path(rect), with: .color(color))
+                    }
+                }
+            }
+        }
+    }
+
+    private func depthMinMax() -> (UInt16, UInt16)? {
+        var minV: UInt16 = .max
+        var maxV: UInt16 = .min
+        for v in depth.values where v > 0 {
+            if v < minV { minV = v }
+            if v > maxV { maxV = v }
+        }
+        if minV == .max || maxV == .min { return nil }
+        return (minV, maxV)
+    }
+
+    private func depthColor(_ t: CGFloat) -> Color {
+        let clamped = min(max(t, 0), 1)
+        return Color(red: clamped, green: 0.2, blue: 1.0 - clamped)
     }
 }
 
