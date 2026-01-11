@@ -12,6 +12,7 @@ import Foundation
 struct ContentView: View {
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var webSocketManager = WebSocketManager()
+    @StateObject private var navigationAgent = NavigationAgent()
     
     // @AppStorage("serverIP") private var serverIP: String = "10.84.104.88" // Change to you ip
     @AppStorage("serverIP") private var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "192.168.1.218" // add it to your env file
@@ -84,7 +85,20 @@ struct ContentView: View {
                         .background(webSocketManager.isConnected ? Color.red : Color.green)
                         .clipShape(Circle())
                     }
-                    
+                    Button(action: {
+                            navigationAgent.startListening()
+                        }) {
+                            VStack {
+                                Image(systemName: "mic.fill")
+                                    .font(.title)
+                                Text("Navigate")
+                                    .font(.caption)
+                            }
+                            .foregroundColor(.white)
+                            .frame(width: 80, height: 80)
+                            .background(Color.purple)
+                            .clipShape(Circle())
+                    }
                     // Stream toggle button
                     Button(action: toggleStreaming) {
                         VStack {
@@ -109,6 +123,7 @@ struct ContentView: View {
             cameraManager.onFrameCaptured = { imageData in
                 webSocketManager.sendFrame(imageData)
             }
+            navigationAgent.requestPermissions()
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView(
