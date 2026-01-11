@@ -88,22 +88,23 @@ struct ContentView: View {
                     path: webSocketManager.analysisPath,
                     obstacles: webSocketManager.analysisObstacles
                 )
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 10)
 
                 if alertsEnabled, let alert = webSocketManager.lastAlert {
                     AlertBannerView(alert: alert)
-                        .padding(.bottom, 8)
+                        .padding(.bottom, 10)
                 }
                 
                 // Stats overlay (small text)
                 if webSocketManager.isConnected {
-                    Text("FPS \(cameraManager.currentFPS)  •  Frames \(webSocketManager.framesSent)  •  \(webSocketManager.latencyMs)ms")
+                    Text("fps \(cameraManager.currentFPS)  ·  frames \(webSocketManager.framesSent)  ·  \(webSocketManager.latencyMs)ms")
                         .font(.caption2)
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(.white.opacity(0.78))
                         .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color.black.opacity(0.4))
-                        .cornerRadius(10)
+                        .padding(.vertical, 5)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                        .shadow(color: .black.opacity(0.15), radius: 6, x: 0, y: 2)
                 }
                 
                 // Control buttons
@@ -118,8 +119,9 @@ struct ContentView: View {
                         }
                         .foregroundColor(.white)
                         .frame(width: 80, height: 80)
-                        .background(webSocketManager.isConnected ? Color.red : Color.green)
-                        .clipShape(Circle())
+                    .background(webSocketManager.isConnected ? Color.red : Color.green)
+                    .clipShape(Circle())
+                    .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
                     }
                     
                     // Stream toggle button
@@ -132,8 +134,9 @@ struct ContentView: View {
                         }
                         .foregroundColor(.white)
                         .frame(width: 80, height: 80)
-                        .background(cameraManager.isStreaming ? Color.orange : Color.blue)
-                        .clipShape(Circle())
+                    .background(cameraManager.isStreaming ? Color.orange : Color.blue)
+                    .clipShape(Circle())
+                    .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
                     }
                     .disabled(!webSocketManager.isConnected)
                     .opacity(webSocketManager.isConnected ? 1.0 : 0.5)
@@ -147,8 +150,9 @@ struct ContentView: View {
                         }
                         .foregroundColor(.white)
                         .frame(width: 80, height: 80)
-                        .background(Color.purple)
-                        .clipShape(Circle())
+                    .background(Color.purple)
+                    .clipShape(Circle())
+                    .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
                     }
                     .disabled(!webSocketManager.isConnected)
                     .opacity(webSocketManager.isConnected ? 1.0 : 0.5)
@@ -167,9 +171,7 @@ struct ContentView: View {
                     if localAvoidanceEnabled {
                         if let alert = avoidanceManager.process(depthMap: depth, criticalDistance: criticalDistanceSetting) {
                             webSocketManager.lastAlert = alert
-                            if hapticsEnabled {
-                                feedbackManager.play(alert: alert)
-                            }
+                            feedbackManager.play(alert: alert, hapticsEnabled: hapticsEnabled)
                         }
                     }
                 }
@@ -186,10 +188,11 @@ struct ContentView: View {
         }
         .onChange(of: webSocketManager.lastAlert?.id) { _ in
             if let alert = webSocketManager.lastAlert {
-                if hapticsEnabled {
-                    feedbackManager.play(alert: alert)
-                }
+                feedbackManager.play(alert: alert, hapticsEnabled: hapticsEnabled)
             }
+        }
+        .onChange(of: webSocketManager.decisionAction) { action in
+            feedbackManager.playDecision(action: action, hapticsEnabled: hapticsEnabled)
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView(
@@ -428,7 +431,7 @@ struct AnalysisOverlayView: View {
                 if !path.isEmpty {
                     Text("Path: \(path)")
                         .font(.caption)
-                        .foregroundColor(.white)
+                        .foregroundColor(.white.opacity(0.9))
                 }
                 if !summary.isEmpty {
                     Text(summary)
@@ -452,10 +455,17 @@ struct AnalysisOverlayView: View {
                 }
             }
             .padding(12)
-            .background(.ultraThinMaterial)
-            .cornerRadius(12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+            )
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.horizontal)
+            .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 6)
         }
     }
 }
@@ -534,6 +544,7 @@ struct DepthMeshView: View {
             }
         }
         .blendMode(.screen)
+        .opacity(0.85)
     }
 }
 
@@ -559,20 +570,61 @@ struct DepthModeOption {
 class AlertFeedbackManager: ObservableObject {
     private let synthesizer = AVSpeechSynthesizer()
     private let notification = UINotificationFeedbackGenerator()
+    private var lastSpokenAt = Date.distantPast
+    private let minSpeakInterval: TimeInterval = 1.0
 
-    func play(alert: AlertMessage) {
+    func play(alert: AlertMessage, hapticsEnabled: Bool) {
+        let now = Date()
+        if now.timeIntervalSince(lastSpokenAt) >= minSpeakInterval {
+            lastSpokenAt = now
+            if synthesizer.isSpeaking {
+                synthesizer.stopSpeaking(at: .immediate)
+            }
+            let utterance = AVSpeechUtterance(string: alert.text)
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            utterance.rate = 0.5
+            synthesizer.speak(utterance)
+        }
         let utterance = AVSpeechUtterance(string: alert.text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
-        synthesizer.speak(utterance)
 
-        switch alert.level {
-        case "CRITICAL":
-            notification.notificationOccurred(.error)
-        case "HIGH":
-            notification.notificationOccurred(.warning)
-        default:
-            notification.notificationOccurred(.success)
+        if hapticsEnabled {
+            switch alert.level {
+            case "CRITICAL":
+                notification.notificationOccurred(.error)
+            case "HIGH":
+                notification.notificationOccurred(.warning)
+            default:
+                notification.notificationOccurred(.success)
+            }
+        }
+    }
+
+    func playDecision(action: String, hapticsEnabled: Bool) {
+        if action == "STOP" {
+            let now = Date()
+            if now.timeIntervalSince(lastSpokenAt) < minSpeakInterval {
+                if hapticsEnabled {
+                    notification.notificationOccurred(.error)
+                }
+                return
+            }
+            lastSpokenAt = now
+            if synthesizer.isSpeaking {
+                synthesizer.stopSpeaking(at: .immediate)
+            }
+            let utterance = AVSpeechUtterance(string: "Stop")
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            utterance.rate = 0.5
+            synthesizer.speak(utterance)
+            if hapticsEnabled {
+                notification.notificationOccurred(.error)
+            }
+        } else if action == "CAUTION" {
+            if hapticsEnabled {
+                notification.notificationOccurred(.warning)
+            }
         }
     }
 }
@@ -582,9 +634,9 @@ struct AlertBannerView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(colorForLevel(alert.level))
-                .frame(width: 10, height: 10)
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundColor(colorForLevel(alert.level))
             Text(alert.text)
                 .font(.caption)
                 .foregroundColor(.white)
@@ -594,9 +646,16 @@ struct AlertBannerView: View {
                 .foregroundColor(.white.opacity(0.8))
         }
         .padding(10)
-        .background(Color.black.opacity(0.55))
-        .cornerRadius(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.55))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
         .padding(.horizontal)
+        .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 6)
     }
 
     private func colorForLevel(_ level: String) -> Color {

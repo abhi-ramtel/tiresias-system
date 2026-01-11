@@ -10,14 +10,14 @@ import asyncio
 import json
 import numpy as np
 from collections import deque
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from detection import get_detector, get_navigation_detector, MOVING_OBJECTS, OBSTACLE_OBJECTS
 import httpx
+import importlib
 
 app = FastAPI(
     title="Tiresias Edge Server",
@@ -58,14 +58,58 @@ class ServerStats:
 stats = ServerStats()
 
 FRAME_MAGIC = b"TSF1"
-FAST_LANE_FPS = 12
-SLOW_LANE_INTERVAL_S = 1.0
-CRITICAL_DISTANCE_M = 2.0
-RING_BUFFER_SECONDS = 5
-RING_BUFFER_FPS = 15
+FAST_LANE_FPS = float(os.getenv("TIRESIAS_FAST_FPS", "12"))
+SLOW_LANE_INTERVAL_S = float(os.getenv("TIRESIAS_SLOW_INTERVAL_S", "1.5"))
+CRITICAL_DISTANCE_M = float(os.getenv("TIRESIAS_CRITICAL_DISTANCE_M", "2.0"))
+RING_BUFFER_SECONDS = int(os.getenv("TIRESIAS_RING_SECONDS", "5"))
+RING_BUFFER_FPS = int(os.getenv("TIRESIAS_RING_FPS", "15"))
 RING_BUFFER_SIZE = RING_BUFFER_SECONDS * RING_BUFFER_FPS
 
 frame_buffer = deque(maxlen=RING_BUFFER_SIZE)
+_detection_module = None
+_MOVING_OBJECTS = None
+_OBSTACLE_OBJECTS = None
+
+def _ensure_detection_loaded():
+    global _detection_module, _MOVING_OBJECTS, _OBSTACLE_OBJECTS
+    if _detection_module is None:
+        _detection_module = importlib.import_module("detection")
+        _MOVING_OBJECTS = _detection_module.MOVING_OBJECTS
+        _OBSTACLE_OBJECTS = _detection_module.OBSTACLE_OBJECTS
+    return _detection_module
+
+def get_detector():
+    return _ensure_detection_loaded().get_detector()
+
+def get_navigation_detector():
+    return _ensure_detection_loaded().get_navigation_detector()
+
+class DecisionEngine:
+    def __init__(self):
+        self.last_action = "CLEAR"
+        self.last_emit = 0.0
+
+    def decide(self, alert: Optional[Dict[str, Any]], analysis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        now = time.time()
+        if alert and alert.get("level") == "CRITICAL":
+            if now - self.last_emit > 0.8:
+                self.last_emit = now
+                self.last_action = "STOP"
+                return {"type": "decision", "action": "STOP", "source": "fast"}
+        if analysis and analysis.get("action") in ("STOP", "CAUTION"):
+            if now - self.last_emit > 1.2:
+                self.last_emit = now
+                self.last_action = analysis.get("action", "CLEAR")
+                return {"type": "decision", "action": self.last_action, "source": "slow"}
+        if now - self.last_emit > 3.0 and self.last_action != "CLEAR":
+            self.last_emit = now
+            self.last_action = "CLEAR"
+            return {"type": "decision", "action": "CLEAR", "source": "none"}
+        return {"type": "decision", "action": self.last_action, "source": "none"}
+
+
+def enqueue_outbound(queue: asyncio.PriorityQueue, priority: int, payload: Dict[str, Any]):
+    queue.put_nowait((priority, time.time(), payload))
 
 def parse_frame_message(payload: bytes):
     if len(payload) >= 2 and payload[0:2] == b"\xff\xd8":
@@ -135,6 +179,7 @@ def attach_depth_to_detections(detections, depth_meta, image_size):
         det["distance_m"] = round(median_mm / 1000.0, 2)
 
 def classify_fast_alert(detections, image_size):
+    _ensure_detection_loaded()
     if not detections:
         return None
     img_w, img_h = image_size
@@ -144,7 +189,7 @@ def classify_fast_alert(detections, image_size):
     best = None
     for det in detections:
         label = det["class"]
-        if label not in MOVING_OBJECTS and label not in OBSTACLE_OBJECTS:
+        if label not in _MOVING_OBJECTS and label not in _OBSTACLE_OBJECTS:
             continue
         x1, y1, x2, y2 = det["bbox"]
         area_ratio = max(0.0, ((x2 - x1) * (y2 - y1)) / float(img_w * img_h))
@@ -248,6 +293,46 @@ async def get_latest_frame():
     if stats.latest_frame is None:
         return Response(content="No frame available", status_code=404)
     return Response(content=stats.latest_frame, media_type="image/jpeg")
+
+
+@app.get("/replay/latest")
+async def replay_latest_frame():
+    """Return the latest frame from the ring buffer"""
+    if not frame_buffer:
+        return JSONResponse({"error": "No frame available"}, status_code=404)
+    return Response(content=frame_buffer[-1]["frame"], media_type="image/jpeg")
+
+
+@app.get("/replay/info")
+async def replay_info():
+    """Return metadata about the ring buffer"""
+    return JSONResponse({
+        "size": len(frame_buffer),
+        "capacity": frame_buffer.maxlen
+    })
+
+
+@app.get("/replay/analyse")
+async def replay_analyse_latest():
+    """Analyse the latest ring buffer frame via slow lane"""
+    if not frame_buffer:
+        return JSONResponse({"error": "No frame available"}, status_code=404)
+    frame_data = frame_buffer[-1]["frame"]
+    detector = get_navigation_detector()
+    result = detector.analyse_frame(frame_data)
+    if "error" in result:
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    return JSONResponse({
+        "success": True,
+        "detections": result["detections"],
+        "count": result["count"],
+        "summary": result["summary"],
+        "warnings": result["warnings"],
+        "action": result["action"],
+        "path": result.get("path", ""),
+        "nearby_obstacles": result.get("nearby_obstacles", []),
+        "image_size": result["image_size"]
+    })
 
 
 @app.post("/analyse")
@@ -422,7 +507,22 @@ async def video_stream(websocket: WebSocket):
     
     fast_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
     latest_frame: Optional[bytes] = None
+    outbound_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+    fast_lane_target = {"fps": FAST_LANE_FPS}
+    slow_lane_target = {"interval": SLOW_LANE_INTERVAL_S}
     stop_event = asyncio.Event()
+
+    decision_engine = DecisionEngine()
+    analysis_state: Dict[str, Any] = {"action": "CLEAR"}
+
+    async def outbound_sender():
+        while not stop_event.is_set():
+            try:
+                _, _, payload = await outbound_queue.get()
+                await websocket.send_text(json.dumps(payload))
+            except Exception:
+                stop_event.set()
+                break
 
     async def fast_lane_worker():
         detector = get_detector()
@@ -432,7 +532,8 @@ async def video_stream(websocket: WebSocket):
         while not stop_event.is_set():
             frame_data, depth_meta = await fast_queue.get()
             now = time.time()
-            if now - last_fast < 1.0 / FAST_LANE_FPS:
+            target_fps = max(1.0, fast_lane_target["fps"])
+            if now - last_fast < 1.0 / target_fps:
                 continue
             image, result, image_size = detector.run_inference(frame_data)
             if result is None:
@@ -452,21 +553,19 @@ async def video_stream(websocket: WebSocket):
                 if now - last_alert_time.get(level, 0.0) < cooldown:
                     last_fast = now
                     continue
-                try:
-                    await websocket.send_text(json.dumps(alert))
-                    last_alert_time[level] = now
-                except Exception:
-                    stop_event.set()
-                    break
+                enqueue_outbound(outbound_queue, 0, alert)
+                last_alert_time[level] = now
+                decision = decision_engine.decide(alert, analysis_state)
+                enqueue_outbound(outbound_queue, 0, decision)
             last_fast = now
 
     async def slow_lane_worker():
         detector = get_navigation_detector()
         last_run = 0.0
         while not stop_event.is_set():
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.08)
             now = time.time()
-            if now - last_run < SLOW_LANE_INTERVAL_S:
+            if now - last_run < slow_lane_target["interval"]:
                 continue
             if latest_frame is None:
                 continue
@@ -487,13 +586,13 @@ async def video_stream(websocket: WebSocket):
                     "nearby_obstacles": result.get("nearby_obstacles", []),
                     "timestamp": datetime.now().isoformat()
                 }
-                try:
-                    await websocket.send_text(json.dumps(payload))
-                except Exception:
-                    stop_event.set()
-                    break
+                analysis_state.update({"action": action})
+                enqueue_outbound(outbound_queue, 1, payload)
+                decision = decision_engine.decide(None, analysis_state)
+                enqueue_outbound(outbound_queue, 0, decision)
             last_run = now
 
+    sender_task = asyncio.create_task(outbound_sender())
     fast_task = asyncio.create_task(fast_lane_worker())
     slow_task = asyncio.create_task(slow_lane_worker())
     
@@ -555,6 +654,19 @@ async def video_stream(websocket: WebSocket):
                 elif data.get("type") == "analyze_now":
                     if frame_buffer:
                         latest_frame = frame_buffer[-1]["frame"]
+                elif data.get("type") == "thermal":
+                    state = data.get("state", "nominal")
+                    if state == "hot":
+                        fast_lane_target["fps"] = min(fast_lane_target["fps"], 6.0)
+                        slow_lane_target["interval"] = max(slow_lane_target["interval"], 3.0)
+                    else:
+                        fast_lane_target["fps"] = FAST_LANE_FPS
+                        slow_lane_target["interval"] = SLOW_LANE_INTERVAL_S
+                elif data.get("type") == "system":
+                    if "fast_fps" in data:
+                        fast_lane_target["fps"] = max(1.0, float(data.get("fast_fps")))
+                    if "slow_interval_s" in data:
+                        slow_lane_target["interval"] = max(0.5, float(data.get("slow_interval_s")))
                 else:
                     print(f"📨 Text message: {text_data}")
                 
@@ -569,6 +681,7 @@ async def video_stream(websocket: WebSocket):
         
     finally:
         stop_event.set()
+        sender_task.cancel()
         fast_task.cancel()
         slow_task.cancel()
         stats.active_connections -= 1

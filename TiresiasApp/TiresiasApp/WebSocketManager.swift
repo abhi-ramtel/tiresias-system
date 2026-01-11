@@ -22,6 +22,7 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var analysisAction: String = ""
     @Published var analysisPath: String = ""
     @Published var analysisObstacles: [String] = []
+    @Published var decisionAction: String = "CLEAR"
     @Published var lastAlert: AlertMessage? = nil
     
     // var serverIP: String = "10.84.104.88" // Use your own IP here (Change it)
@@ -239,6 +240,7 @@ class WebSocketManager: NSObject, ObservableObject {
             self.analysisAction = ""
             self.analysisPath = ""
             self.analysisObstacles = []
+            self.decisionAction = "CLEAR"
             self.lastAlert = nil
             self.connectionMethod = "WiFi"
         }
@@ -297,6 +299,9 @@ class WebSocketManager: NSObject, ObservableObject {
         
         // Start ping timer for latency measurement
         startPingTimer()
+
+        // Fallback: mark connected on successful ping if delegate doesn't fire
+        probeConnection()
     }
     
     // MARK: - Frame Sending
@@ -392,6 +397,18 @@ class WebSocketManager: NSObject, ObservableObject {
                 let latency = Int(Date().timeIntervalSince(pingTime) * 1000)
                 DispatchQueue.main.async {
                     self.latencyMs = latency
+                }
+            }
+        }
+    }
+
+    private func probeConnection() {
+        webSocketTask?.sendPing { [weak self] error in
+            guard let self = self else { return }
+            if error == nil && !self.isConnected {
+                DispatchQueue.main.async {
+                    self.isConnected = true
+                    self.updateStatus(.connected)
                 }
             }
         }
@@ -514,6 +531,11 @@ extension WebSocketManager: URLSessionWebSocketDelegate {
                 self?.analysisAction = action
                 self?.analysisPath = path
                 self?.analysisObstacles = obstacles
+            }
+        } else if type == "decision" {
+            let action = object["action"] as? String ?? "CLEAR"
+            DispatchQueue.main.async { [weak self] in
+                self?.decisionAction = action
             }
         } else if type == "alert" {
             let level = object["level"] as? String ?? "MEDIUM"
