@@ -5,14 +5,12 @@ FastAPI WebSocket server for receiving video frames from iOS app
 """
 
 import uvicorn
-import asyncio
 import time
-import base64
 from datetime import datetime
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from detection import get_detector
+from detection import get_detector, get_navigation_detector
 
 app = FastAPI(
     title="Tiresias Edge Server",
@@ -62,7 +60,9 @@ async def root():
         "endpoints": {
             "health": "/health",
             "stats": "/stats",
-            "websocket": "/ws/video"
+            "websocket": "/ws/video",
+            "analyse": "/analyse (POST image)",
+            "analyse_latest": "/analyse/frame"
         }
     })
 
@@ -88,6 +88,74 @@ async def get_latest_frame():
     if stats.latest_frame is None:
         return Response(content="No frame available", status_code=404)
     return Response(content=stats.latest_frame, media_type="image/jpeg")
+
+
+@app.post("/analyse")
+async def analyse_frame(image: UploadFile = File(...)):
+    """
+    Analyse a single image for navigation assistance.
+    
+    Args:
+        image: JPEG image file
+        
+    Returns:
+        JSON with detections, navigation summary, and warnings
+    """
+    try:
+        # Read image bytes
+        image_bytes = await image.read()
+        
+        # Get navigation detector
+        detector = get_navigation_detector()
+        
+        # Analyse frame
+        result = detector.analyse_frame(image_bytes)
+        
+        if "error" in result:
+            return JSONResponse({"error": result["error"]}, status_code=400)
+        
+        return JSONResponse({
+            "success": True,
+            "detections": result["detections"],
+            "count": result["count"],
+            "summary": result["summary"],
+            "warnings": result["warnings"],
+            "image_size": result["image_size"]
+        })
+        
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/analyse/frame")
+async def analyse_latest_frame():
+    """
+    Analyse the latest received frame from the video stream.
+    
+    Returns:
+        JSON with detections, navigation summary, and warnings
+    """
+    if stats.latest_frame is None:
+        return JSONResponse({"error": "No frame available"}, status_code=404)
+    
+    try:
+        detector = get_navigation_detector()
+        result = detector.analyse_frame(stats.latest_frame)
+        
+        if "error" in result:
+            return JSONResponse({"error": result["error"]}, status_code=400)
+        
+        return JSONResponse({
+            "success": True,
+            "detections": result["detections"],
+            "count": result["count"],
+            "summary": result["summary"],
+            "warnings": result["warnings"],
+            "image_size": result["image_size"]
+        })
+        
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/view")
@@ -268,6 +336,8 @@ def main():
     print("❤️  Health: http://0.0.0.0:8000/health")
     print("📊 Stats: http://0.0.0.0:8000/stats")
     print("👁️  Live View: http://0.0.0.0:8000/view")
+    print("🎯 Analyse: POST http://0.0.0.0:8000/analyse")
+    print("🎯 Analyse Latest: GET http://0.0.0.0:8000/analyse/frame")
     print("=" * 60)
     print("📱 Connect from iOS using your Mac's IP address")
     print("   Find IP: ipconfig getifaddr en0")
