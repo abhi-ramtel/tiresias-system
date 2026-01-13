@@ -19,8 +19,8 @@ struct ContentView: View {
     @StateObject private var avoidanceManager = LocalAvoidanceManager()
     @State private var depthMap: DepthMap? = nil
     
-    // @AppStorage("serverIP") private var serverIP: String = "10.84.104.88" // Change to you ip
-    @AppStorage("serverIP") private var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "192.168.1.218" // add it to your env file
+    // Default to your Mac's current IP address
+    @AppStorage("serverIP") private var serverIP: String = "10.84.104.88"
     @AppStorage("settings_fps") private var fpsSetting: Double = 15
     @AppStorage("settings_preset") private var presetSetting: String = "inputPriority"
     @AppStorage("settings_jpeg_quality") private var jpegQualitySetting: Double = 0.15

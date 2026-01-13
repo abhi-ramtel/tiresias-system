@@ -25,8 +25,8 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var decisionAction: String = "CLEAR"
     @Published var lastAlert: AlertMessage? = nil
     
-    // var serverIP: String = "10.84.104.88" // Use your own IP here (Change it)
-    var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "192.168.1.218" // add it to your env file
+    // Default to your Mac's current IP address
+    var serverIP: String = "10.84.104.88"
     
     private let serverPort = 8000
     private var usingUSBFallback = false
