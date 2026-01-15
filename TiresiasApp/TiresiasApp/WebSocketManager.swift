@@ -18,7 +18,7 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var connectionMethod: String = "WiFi"
     
     // var serverIP: String = "10.84.104.88" // Use your own IP here (Change it)
-    var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "192.168.1.218" // add it to your env file
+    var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "192.168.1.219" // add it to your env file
     
     private let serverPort = 8000
     private var usingUSBFallback = false

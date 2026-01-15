@@ -13,7 +13,7 @@ class ContentViewTests: XCTestCase {
     func testServerIPInitialization_withEnvironmentVariable() {
         // This test requires setting the environment variable "IP_ADDRESS" before running the test.
         // You can do this in your test scheme settings.
-        let expectedIP = "192.168.1.218"
+        let expectedIP = "192.168.1.219"
         ProcessInfo.processInfo.environment["IP_ADDRESS"] = expectedIP
         
         let contentView = ContentView()
