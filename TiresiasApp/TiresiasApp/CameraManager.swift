@@ -8,15 +8,34 @@
 import AVFoundation
 import UIKit
 
+enum CameraZoomLevel: String, CaseIterable {
+    case ultraWide = "0.5x"
+    case wide = "1x"
+    
+    var displayName: String { rawValue }
+    
+    var deviceType: AVCaptureDevice.DeviceType {
+        switch self {
+        case .ultraWide: return .builtInUltraWideCamera
+        case .wide: return .builtInWideAngleCamera
+        }
+    }
+}
+
 class CameraManager: NSObject, ObservableObject {
     @Published var isStreaming = false
     @Published var currentFPS: Int = 0
     @Published var hasPermission = false
+    @Published var currentZoom: CameraZoomLevel = .wide
+    @Published var isUltraWideAvailable = false
     
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let processingQueue = DispatchQueue(label: "camera.processing.queue", qos: .userInteractive)
+    
+    // Current camera input
+    private var currentInput: AVCaptureDeviceInput?
     
     // Frame rate tracking
     private var frameCount = 0
@@ -27,11 +46,32 @@ class CameraManager: NSObject, ObservableObject {
     
     // Configuration
     private let targetFPS: Double = 30
-    private let jpegQuality: CGFloat = 0.25  // Low quality for speed, sufficient for AI
+    private let jpegQuality: CGFloat = 0.25  // Slightly higher for path detection
+    
+    // Performance optimization - reuse CIContext
+    private lazy var ciContext: CIContext = {
+        CIContext(options: [
+            .useSoftwareRenderer: false,
+            .highQualityDownsample: false,
+            .cacheIntermediates: false
+        ])
+    }()
+    
+    // Frame skipping for when path overlay is active
+    private var skipCounter = 0
+    private let skipEveryNFrames = 2  // Send every other frame when needed
     
     override init() {
         super.init()
+        checkUltraWideAvailability()
         setupSession()
+    }
+    
+    private func checkUltraWideAvailability() {
+        let ultraWide = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
+        DispatchQueue.main.async {
+            self.isUltraWideAvailable = ultraWide != nil
+        }
     }
     
     func checkPermissions() {
@@ -57,6 +97,100 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
     
+    // MARK: - Camera Switching
+    
+    func switchCamera(to zoom: CameraZoomLevel) {
+        guard zoom != currentZoom else { return }
+        
+        // Check if ultra-wide is available
+        if zoom == .ultraWide && !isUltraWideAvailable {
+            print("⚠️ Ultra-wide camera not available on this device")
+            return
+        }
+        
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Get the target camera
+            guard let newCamera = AVCaptureDevice.default(zoom.deviceType, for: .video, position: .back) else {
+                print("❌ Camera not available: \(zoom.displayName)")
+                return
+            }
+            
+            // Create new input
+            let newInput: AVCaptureDeviceInput
+            do {
+                newInput = try AVCaptureDeviceInput(device: newCamera)
+            } catch {
+                print("❌ Failed to create camera input: \(error)")
+                return
+            }
+            
+            // Reconfigure session
+            self.session.beginConfiguration()
+            
+            // Remove current input
+            if let currentInput = self.currentInput {
+                self.session.removeInput(currentInput)
+            }
+            
+            // Add new input
+            if self.session.canAddInput(newInput) {
+                self.session.addInput(newInput)
+                self.currentInput = newInput
+                
+                // Configure new camera
+                self.configureCamera(newCamera)
+                
+                // Update video orientation
+                if let connection = self.videoOutput.connection(with: .video) {
+                    if connection.isVideoRotationAngleSupported(90) {
+                        connection.videoRotationAngle = 90
+                    }
+                }
+                
+                DispatchQueue.main.async {
+                    self.currentZoom = zoom
+                }
+                print("✅ Switched to \(zoom.displayName) camera")
+            } else {
+                print("❌ Cannot add camera input")
+            }
+            
+            self.session.commitConfiguration()
+        }
+    }
+    
+    private func configureCamera(_ camera: AVCaptureDevice) {
+        do {
+            try camera.lockForConfiguration()
+            
+            // Set frame rate
+            let targetFrameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFPS))
+            if let frameRateRange = camera.activeFormat.videoSupportedFrameRateRanges.first {
+                if frameRateRange.minFrameDuration <= targetFrameDuration && targetFrameDuration <= frameRateRange.maxFrameDuration {
+                    camera.activeVideoMinFrameDuration = targetFrameDuration
+                    camera.activeVideoMaxFrameDuration = targetFrameDuration
+                }
+            }
+            
+            // Auto-focus and exposure
+            if camera.isFocusModeSupported(.continuousAutoFocus) {
+                camera.focusMode = .continuousAutoFocus
+            }
+            if camera.isExposureModeSupported(.continuousAutoExposure) {
+                camera.exposureMode = .continuousAutoExposure
+            }
+            if camera.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                camera.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
+            
+            camera.unlockForConfiguration()
+        } catch {
+            print("⚠️ Could not configure camera: \(error)")
+        }
+    }
+    
     private func setupSession() {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
@@ -76,7 +210,7 @@ class CameraManager: NSObject, ObservableObject {
                 self.session.sessionPreset = .medium
             }
             
-            // Setup camera input
+            // Setup camera input - start with wide angle (1x)
             guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
                 print("❌ No back camera found")
                 self.session.commitConfiguration()
@@ -95,40 +229,15 @@ class CameraManager: NSObject, ObservableObject {
             
             if self.session.canAddInput(input) {
                 self.session.addInput(input)
+                self.currentInput = input
             } else {
                 print("❌ Cannot add camera input")
                 self.session.commitConfiguration()
                 return
             }
             
-            // Configure camera for optimal frame rate
-            do {
-                try camera.lockForConfiguration()
-                
-                // Set frame rate if supported
-                let targetFrameDuration = CMTime(value: 1, timescale: CMTimeScale(self.targetFPS))
-                if let frameRateRange = camera.activeFormat.videoSupportedFrameRateRanges.first {
-                    if frameRateRange.minFrameDuration <= targetFrameDuration && targetFrameDuration <= frameRateRange.maxFrameDuration {
-                        camera.activeVideoMinFrameDuration = targetFrameDuration
-                        camera.activeVideoMaxFrameDuration = targetFrameDuration
-                    }
-                }
-                
-                // Additional optimizations
-                if camera.isFocusModeSupported(.continuousAutoFocus) {
-                    camera.focusMode = .continuousAutoFocus
-                }
-                if camera.isExposureModeSupported(.continuousAutoExposure) {
-                    camera.exposureMode = .continuousAutoExposure
-                }
-                if camera.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                    camera.whiteBalanceMode = .continuousAutoWhiteBalance
-                }
-                
-                camera.unlockForConfiguration()
-            } catch {
-                print("⚠️ Could not configure camera: \(error)")
-            }
+            // Configure camera
+            self.configureCamera(camera)
             
             // Setup video output
             self.videoOutput.videoSettings = [
@@ -220,6 +329,10 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard isStreaming else { return }
         
+        // Skip frames to reduce load
+        skipCounter += 1
+        guard skipCounter % skipEveryNFrames == 0 else { return }
+        
         // Ensure we're working with a valid buffer
         guard CMSampleBufferIsValid(sampleBuffer),
               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
@@ -232,11 +345,10 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly)
         }
         
-        // Convert to JPEG
+        // Convert to JPEG using reused context
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext(options: [.useSoftwareRenderer: false])
         
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
             return
         }
         

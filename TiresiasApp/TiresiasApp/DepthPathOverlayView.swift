@@ -86,9 +86,9 @@ class ARDepthManager: NSObject, ObservableObject {
     
     // Frame throttling for performance - process only every Nth frame
     private var frameCount: Int = 0
-    private let processEveryNthFrame: Int = 5 // Process 1 in 5 frames (~12fps instead of 60)
+    private let processEveryNthFrame: Int = 8 // Process 1 in 8 frames (~7fps instead of 60)
     private var lastProcessTime = Date.distantPast
-    private let minProcessInterval: TimeInterval = 0.1 // Max 10 updates/sec
+    private let minProcessInterval: TimeInterval = 0.15 // Max ~6 updates/sec
     
     func createARView() -> ARView {
         let arView = ARView(frame: .zero)

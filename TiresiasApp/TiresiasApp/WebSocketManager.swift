@@ -7,6 +7,7 @@
 
 import Foundation
 import Network
+import AVFoundation
 
 class WebSocketManager: NSObject, ObservableObject {
     @Published var isConnected = false
@@ -17,8 +18,77 @@ class WebSocketManager: NSObject, ObservableObject {
     @Published var errorMessage = ""
     @Published var connectionMethod: String = "WiFi"
     
+    // Path Guidance properties
+    @Published var guidanceDirection: String = "path_clear"
+    @Published var guidanceInstruction: String = ""
+    @Published var pathClearPercent: Double = 100.0
+    @Published var obstacleCount: Int = 0
+    @Published var detectedObstacles: [String] = []
+    @Published var guidanceEnabled: Bool = true
+    @Published var voiceGuidanceEnabled: Bool = true
+    
+    // Voice synthesis for guidance
+    private let synthesizer = AVSpeechSynthesizer()
+    private var lastVoiceAnnouncementTime = Date.distantPast
+    private let voiceAnnouncementInterval: TimeInterval = 2.0  // Don't repeat too often
+    private var lastAnnouncedDirection: String = ""
+    private var premiumVoice: AVSpeechSynthesisVoice?
+    
+    // Find the best available voice on device
+    private func findPremiumVoice() -> AVSpeechSynthesisVoice? {
+        // Try Alex first (Siri-quality voice)
+        if let alexVoice = AVSpeechSynthesisVoice(identifier: AVSpeechSynthesisVoiceIdentifierAlex) {
+            print("🎙️ Using Alex voice (premium)")
+            return alexVoice
+        }
+        
+        // Look for enhanced/premium quality voices
+        let allVoices = AVSpeechSynthesisVoice.speechVoices()
+        
+        // Filter for English voices and prefer premium quality
+        let englishVoices = allVoices.filter { $0.language.starts(with: "en") }
+        
+        // Try to find a premium quality voice (iOS 16+)
+        if #available(iOS 16.0, *) {
+            // Look for premium voices first
+            if let premiumVoice = englishVoices.first(where: { $0.voiceTraits.contains(.isPersonalVoice) }) {
+                print("🎙️ Using Personal Voice")
+                return premiumVoice
+            }
+        }
+        
+        // Look for enhanced quality voices (marked as "enhanced" in identifier)
+        if let enhancedVoice = englishVoices.first(where: { 
+            $0.identifier.lowercased().contains("enhanced") || 
+            $0.identifier.lowercased().contains("premium") ||
+            $0.quality == .enhanced
+        }) {
+            print("🎙️ Using enhanced voice: \(enhancedVoice.name)")
+            return enhancedVoice
+        }
+        
+        // Prefer specific high-quality voices by name
+        let preferredNames = ["Samantha", "Evan", "Nicky", "Aaron", "Allison"]
+        for name in preferredNames {
+            if let voice = englishVoices.first(where: { $0.name == name && $0.quality == .enhanced }) {
+                print("🎙️ Using \(name) (enhanced)")
+                return voice
+            }
+        }
+        
+        // Fall back to any enhanced English voice
+        if let enhancedVoice = englishVoices.first(where: { $0.quality == .enhanced }) {
+            print("🎙️ Using enhanced voice: \(enhancedVoice.name)")
+            return enhancedVoice
+        }
+        
+        // Last resort: default en-US voice
+        print("🎙️ Using default en-US voice")
+        return AVSpeechSynthesisVoice(language: "en-US")
+    }
+    
     // var serverIP: String = "10.84.104.88" // Use your own IP here (Change it)
-    var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "192.168.1.219" // add it to your env file
+    var serverIP: String = ProcessInfo.processInfo.environment["IP_ADDRESS"] ?? "10.84.15.64" // add it to your env file
     
     private let serverPort = 8000
     private var usingUSBFallback = false
@@ -323,14 +393,133 @@ class WebSocketManager: NSObject, ObservableObject {
     private func handleMessage(_ message: URLSessionWebSocketTask.Message) {
         switch message {
         case .string(let text):
-            print("📨 Received: \(text)")
-            // Handle text responses from server (e.g., AI analysis results)
+            // Parse JSON guidance messages
+            if let data = text.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                
+                if let type = json["type"] as? String {
+                    if type == "guidance" {
+                        DispatchQueue.main.async {
+                            let newDirection = json["direction"] as? String ?? "path_clear"
+                            self.guidanceDirection = newDirection
+                            self.guidanceInstruction = json["instruction"] as? String ?? ""
+                            self.pathClearPercent = json["path_clear_percent"] as? Double ?? 100.0
+                            self.obstacleCount = json["obstacle_count"] as? Int ?? 0
+                            
+                            // Parse obstacles
+                            if let obstacles = json["obstacles"] as? [[String: Any]] {
+                                self.detectedObstacles = obstacles.compactMap { $0["class"] as? String }
+                            }
+                            
+                            // Voice announcement for direction changes
+                            self.announceGuidanceIfNeeded(direction: newDirection)
+                        }
+                    }
+                }
+            }
             
         case .data(let data):
             print("📦 Received data: \(data.count) bytes")
             
         @unknown default:
             break
+        }
+    }
+    
+    // MARK: - Voice Guidance
+    
+    private func announceGuidanceIfNeeded(direction: String) {
+        guard voiceGuidanceEnabled && guidanceEnabled else { return }
+        
+        // Only announce important changes
+        let now = Date()
+        let timeSinceLastAnnouncement = now.timeIntervalSince(lastVoiceAnnouncementTime)
+        
+        // Announce immediately for critical directions, or throttle for others
+        let isCritical = direction == "stop" || direction == "move_left" || direction == "move_right"
+        let shouldAnnounce = (direction != lastAnnouncedDirection && isCritical) ||
+                             (direction != "path_clear" && timeSinceLastAnnouncement >= voiceAnnouncementInterval)
+        
+        guard shouldAnnounce else { return }
+        
+        // Generate voice message
+        let voiceMessage: String
+        switch direction {
+        case "path_clear":
+            // Don't announce path clear unless transitioning from blocked
+            if lastAnnouncedDirection == "stop" || lastAnnouncedDirection == "move_left" || lastAnnouncedDirection == "move_right" {
+                voiceMessage = "Path clear"
+            } else {
+                return
+            }
+        case "move_left":
+            voiceMessage = "Move left"
+        case "move_right":
+            voiceMessage = "Move right"
+        case "slight_left":
+            voiceMessage = "Slight left"
+        case "slight_right":
+            voiceMessage = "Slight right"
+        case "stop":
+            voiceMessage = "Stop. Obstacle ahead"
+        case "slow_down":
+            voiceMessage = "Slow down"
+        default:
+            return
+        }
+        
+        // Speak the message with premium voice
+        let utterance = AVSpeechUtterance(string: voiceMessage)
+        
+        // Use cached premium voice or find one
+        if premiumVoice == nil {
+            premiumVoice = findPremiumVoice()
+        }
+        utterance.voice = premiumVoice
+        
+        // Tuned parameters for natural speech
+        utterance.rate = 0.48  // Slightly slower than default for clarity
+        utterance.pitchMultiplier = 1.05  // Slightly higher pitch sounds more natural
+        utterance.volume = 1.0
+        utterance.preUtteranceDelay = 0.0
+        utterance.postUtteranceDelay = 0.1
+        
+        // Stop any current speech and speak new message
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+        synthesizer.speak(utterance)
+        
+        lastVoiceAnnouncementTime = now
+        lastAnnouncedDirection = direction
+    }
+    
+    func setVoiceGuidanceEnabled(_ enabled: Bool) {
+        voiceGuidanceEnabled = enabled
+        if !enabled {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+    }
+    
+    // MARK: - Guidance Control
+    
+    func setGuidanceEnabled(_ enabled: Bool) {
+        guidanceEnabled = enabled
+        
+        // Send command to server
+        let command: [String: Any] = [
+            "type": "set_guidance",
+            "enabled": enabled
+        ]
+        
+        if let data = try? JSONSerialization.data(withJSONObject: command),
+           let jsonString = String(data: data, encoding: .utf8) {
+            let message = URLSessionWebSocketTask.Message.string(jsonString)
+            webSocketTask?.send(message) { error in
+                if let error = error {
+                    print("❌ Failed to send guidance command: \(error)")
+                }
+            }
         }
     }
     

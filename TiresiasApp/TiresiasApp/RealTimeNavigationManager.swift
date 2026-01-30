@@ -24,6 +24,10 @@ final class RealTimeNavigationManager: NSObject, ObservableObject {
     @Published private(set) var routeSteps: [RouteStep] = []
     @Published private(set) var currentStepIndex = 0
     
+    // Route visualization
+    @Published var currentRoute: MKRoute?
+    @Published var destinationCoordinate: CLLocationCoordinate2D?
+    
     // MARK: - Private Properties
     private let locationManager = LocationManager.shared
     private let synthesizer = AVSpeechSynthesizer()
@@ -83,6 +87,8 @@ final class RealTimeNavigationManager: NSObject, ObservableObject {
         routeSteps = []
         currentStepIndex = 0
         currentInstruction = .unknown
+        currentRoute = nil
+        destinationCoordinate = nil
         synthesizer.stopSpeaking(at: .immediate)
         speak("Navigation stopped")
     }
@@ -125,6 +131,7 @@ final class RealTimeNavigationManager: NSObject, ObservableObject {
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: userLocation.coordinate))
         request.destination = destination
         request.transportType = .walking
+        request.requestsAlternateRoutes = false
         
         MKDirections(request: request).calculate { [weak self] response, error in
             guard let self = self else { return }
@@ -138,6 +145,12 @@ final class RealTimeNavigationManager: NSObject, ObservableObject {
             guard let route = response?.routes.first else {
                 self.speak("No walking route available")
                 return
+            }
+            
+            // Store route for visualization
+            DispatchQueue.main.async {
+                self.currentRoute = route
+                self.destinationCoordinate = destination.placemark.coordinate
             }
             
             // Convert MKRoute.Step to our RouteStep

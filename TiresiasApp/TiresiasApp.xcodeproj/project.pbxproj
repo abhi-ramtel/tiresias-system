@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		4D27A8302F12EF860027C80C /* NavigationAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D27A82F2F12EF800027C80C /* NavigationAgent.swift */; };
+		D71E9EF72F2D0C5D008BA0C7 /* NavigationMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D71E9EF62F2D0C5D008BA0C7 /* NavigationMapView.swift */; };
+		D7A9EB3C2F2D14FD00B68434 /* PathGuidanceOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A9EB3B2F2D14FD00B68434 /* PathGuidanceOverlayView.swift */; };
 		E91234560001 /* TiresiasApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91234550001 /* TiresiasApp.swift */; };
 		E91234580001 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91234570001 /* ContentView.swift */; };
 		E912345A0001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E91234590001 /* Assets.xcassets */; };
@@ -15,10 +17,17 @@
 		E912345E0001 /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E912345D0001 /* WebSocketManager.swift */; };
 		E91234600001 /* CameraPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E912345F0001 /* CameraPreviewView.swift */; };
 		E91234620001 /* ConnectionStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = E91234610001 /* ConnectionStatus.swift */; };
+		F01234700001 /* LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F01234710001 /* LocationManager.swift */; };
+		F01234720001 /* MiniMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F01234730001 /* MiniMapView.swift */; };
+		F01234740001 /* ExpandedMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F01234750001 /* ExpandedMapView.swift */; };
+		F01234760001 /* RealTimeNavigationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F01234770001 /* RealTimeNavigationManager.swift */; };
+		F01234780001 /* DepthPathOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F01234790001 /* DepthPathOverlayView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		4D27A82F2F12EF800027C80C /* NavigationAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationAgent.swift; sourceTree = "<group>"; };
+		D71E9EF62F2D0C5D008BA0C7 /* NavigationMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationMapView.swift; sourceTree = "<group>"; };
+		D7A9EB3B2F2D14FD00B68434 /* PathGuidanceOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathGuidanceOverlayView.swift; sourceTree = "<group>"; };
 		E91234520001 /* TiresiasApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TiresiasApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E91234550001 /* TiresiasApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TiresiasApp.swift; sourceTree = "<group>"; };
 		E91234570001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -28,6 +37,11 @@
 		E912345F0001 /* CameraPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPreviewView.swift; sourceTree = "<group>"; };
 		E91234610001 /* ConnectionStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatus.swift; sourceTree = "<group>"; };
 		E91234630001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F01234710001 /* LocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationManager.swift; sourceTree = "<group>"; };
+		F01234730001 /* MiniMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniMapView.swift; sourceTree = "<group>"; };
+		F01234750001 /* ExpandedMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpandedMapView.swift; sourceTree = "<group>"; };
+		F01234770001 /* RealTimeNavigationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTimeNavigationManager.swift; sourceTree = "<group>"; };
+		F01234790001 /* DepthPathOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepthPathOverlayView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +74,8 @@
 		E91234540001 /* TiresiasApp */ = {
 			isa = PBXGroup;
 			children = (
+				D7A9EB3B2F2D14FD00B68434 /* PathGuidanceOverlayView.swift */,
+				D71E9EF62F2D0C5D008BA0C7 /* NavigationMapView.swift */,
 				E91234550001 /* TiresiasApp.swift */,
 				E91234570001 /* ContentView.swift */,
 				E912345B0001 /* CameraManager.swift */,
@@ -67,6 +83,11 @@
 				4D27A82F2F12EF800027C80C /* NavigationAgent.swift */,
 				E912345F0001 /* CameraPreviewView.swift */,
 				E91234610001 /* ConnectionStatus.swift */,
+				F01234710001 /* LocationManager.swift */,
+				F01234730001 /* MiniMapView.swift */,
+				F01234750001 /* ExpandedMapView.swift */,
+				F01234770001 /* RealTimeNavigationManager.swift */,
+				F01234790001 /* DepthPathOverlayView.swift */,
 				E91234590001 /* Assets.xcassets */,
 				E91234630001 /* Info.plist */,
 			);
@@ -142,6 +163,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D71E9EF72F2D0C5D008BA0C7 /* NavigationMapView.swift in Sources */,
 				E91234560001 /* TiresiasApp.swift in Sources */,
 				E91234580001 /* ContentView.swift in Sources */,
 				E912345C0001 /* CameraManager.swift in Sources */,
@@ -149,6 +171,12 @@
 				E912345E0001 /* WebSocketManager.swift in Sources */,
 				E91234600001 /* CameraPreviewView.swift in Sources */,
 				E91234620001 /* ConnectionStatus.swift in Sources */,
+				D7A9EB3C2F2D14FD00B68434 /* PathGuidanceOverlayView.swift in Sources */,
+				F01234700001 /* LocationManager.swift in Sources */,
+				F01234720001 /* MiniMapView.swift in Sources */,
+				F01234740001 /* ExpandedMapView.swift in Sources */,
+				F01234760001 /* RealTimeNavigationManager.swift in Sources */,
+				F01234780001 /* DepthPathOverlayView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -300,7 +328,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tiresias.app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.tiresias.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -330,7 +358,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.tiresias.app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.tiresias.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

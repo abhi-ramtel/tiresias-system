@@ -3,7 +3,7 @@
 # Usage: source set_env.sh && open TiresiasApp/TiresiasApp.xcodeproj
 
 # Get Mac's IP address
-export SERVER_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+export SERVER_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en0 2>/dev/null)
 
 if [ -z "$SERVER_IP" ]; then
     echo "⚠️  Could not detect IP. Using default."

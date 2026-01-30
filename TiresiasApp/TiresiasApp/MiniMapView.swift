@@ -11,6 +11,7 @@ import MapKit
 
 struct MiniMapView: View {
     @ObservedObject var locationManager = LocationManager.shared
+    @ObservedObject var navigationManager: RealTimeNavigationManager
     @Binding var isExpanded: Bool
     
     // Map camera position
@@ -20,6 +21,21 @@ struct MiniMapView: View {
         ZStack {
             // Map content
             Map(position: $cameraPosition) {
+                // Walking route polyline
+                if let route = navigationManager.currentRoute {
+                    MapPolyline(route.polyline)
+                        .stroke(.blue, lineWidth: 3)
+                }
+                
+                // Destination marker
+                if let destination = navigationManager.destinationCoordinate {
+                    Annotation("", coordinate: destination) {
+                        Image(systemName: "mappin.circle.fill")
+                            .font(.title)
+                            .foregroundColor(.red)
+                    }
+                }
+                
                 // User location with heading indicator
                 if let location = locationManager.currentLocation {
                     Annotation("You", coordinate: location.coordinate) {
@@ -69,6 +85,13 @@ struct MiniMapView: View {
         .accessibilityAddTraits(.isButton)
         .onChange(of: locationManager.currentLocation) { _, newLocation in
             updateCameraPosition(for: newLocation)
+        }
+        .onChange(of: navigationManager.currentRoute) { _, _ in
+            // Update camera to show full route when route is set
+            if navigationManager.currentRoute != nil,
+               let location = locationManager.currentLocation {
+                updateCameraPosition(for: location)
+            }
         }
         .onAppear {
             locationManager.requestPermissions()
@@ -139,6 +162,6 @@ struct Triangle: Shape {
 #Preview {
     ZStack {
         Color.gray
-        MiniMapView(isExpanded: .constant(false))
+        MiniMapView(navigationManager: RealTimeNavigationManager(), isExpanded: .constant(false))
     }
 }

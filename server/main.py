@@ -13,6 +13,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from detection import get_detector
+from path_guidance import get_guidance_engine
+import json
 
 app = FastAPI(
     title="Tiresias Edge Server",
@@ -177,6 +179,7 @@ async def video_stream(websocket: WebSocket):
     """
     WebSocket endpoint for video frame streaming
     Receives binary JPEG frames from iOS app
+    Returns guidance instructions as JSON
     """
     await websocket.accept()
     
@@ -191,6 +194,9 @@ async def video_stream(websocket: WebSocket):
     start_time = time.time()
     last_fps_update = start_time
     fps_frame_count = 0
+    guidance_enabled = True  # Path guidance mode
+    last_guidance_time = 0
+    guidance_interval = 0.1  # Send guidance every 100ms
     
     try:
         while True:
@@ -199,6 +205,8 @@ async def video_stream(websocket: WebSocket):
             if "bytes" in message:
                 frame_data = message["bytes"]
                 stats.total_frames_received += 1
+                frame_count += 1
+                fps_frame_count += 1
                 
                 # --- START AI PIPELINE ---
                 
@@ -206,43 +214,73 @@ async def video_stream(websocket: WebSocket):
                 detector = get_detector()
                 
                 # 2. Process the frame (Detect & Paint)
-                # This returns the image with boxes AND the data list
                 annotated_frame, detections = detector.process_and_annotate(frame_data)
                 
-                # 3. Update the global view
-                # Now /view will show the boxes!
-                stats.latest_frame = annotated_frame
+                # 3. Path Guidance Analysis
+                guidance_engine = get_guidance_engine()
+                guidance_result = guidance_engine.analyze_frame(
+                    frame_data, 
+                    detections,
+                    annotate=True
+                )
+                
+                # Use guidance-annotated frame for display
+                if guidance_result.annotated_frame:
+                    stats.latest_frame = guidance_result.annotated_frame
+                else:
+                    stats.latest_frame = annotated_frame
+                    
                 stats.latest_frame_time = datetime.now()
                 
                 # --- END AI PIPELINE ---
 
-                # (Optional) Log significant detections
-                if len(detections) > 0:
-                    # Just print to console for now so you see it working
-                    labels = [d['class'] for d in detections]
-                    print(f"👀 Saw: {', '.join(labels)}")
-
-                # Performance Stats Update (Keep your existing FPS code here)
+                # Send guidance to client (throttled)
                 current_time = time.time()
-                # ... existing FPS logic ...
+                if guidance_enabled and (current_time - last_guidance_time) >= guidance_interval:
+                    guidance_message = {
+                        "type": "guidance",
+                        "direction": guidance_result.direction.value,
+                        "instruction": guidance_result.instruction,
+                        "confidence": guidance_result.confidence,
+                        "path_clear_percent": guidance_result.path_clear_percentage,
+                        "obstacle_count": len(guidance_result.obstacles_detected),
+                        "obstacles": [
+                            {"class": o.get("class", ""), "priority": o.get("is_high_priority", False)}
+                            for o in guidance_result.obstacles_detected[:5]  # Top 5 obstacles
+                        ]
+                    }
+                    await websocket.send_text(json.dumps(guidance_message))
+                    last_guidance_time = current_time
+
+                # Log significant detections
+                if len(detections) > 0:
+                    labels = [d['class'] for d in detections]
+                    print(f"👀 Saw: {', '.join(labels)} | 🧭 {guidance_result.direction.value}")
+
+                # Performance Stats Update
                 if current_time - last_fps_update >= 1.0:
                     fps = fps_frame_count / (current_time - last_fps_update)
-                    print(f"📹 Receiving: {fps:.1f} FPS | Frame #{frame_count} | Size: {len(frame_data):,} bytes")
+                    print(f"📹 Receiving: {fps:.1f} FPS | Frame #{frame_count} | Path: {guidance_result.path_clear_percentage:.0f}% clear")
                     fps_frame_count = 0
                     last_fps_update = current_time
                 
-                # TODO: Process frame here
-                # - Run YOLO detection
-                # - Run LLM analysis
-                # - Send results back to client
-                
             elif "text" in message:
-                # Text message (commands, etc.)
+                # Text message (commands)
                 text_data = message["text"]
                 print(f"📨 Text message: {text_data}")
                 
-                # Echo back for testing
-                await websocket.send_text(f"Received: {text_data}")
+                try:
+                    cmd = json.loads(text_data)
+                    if cmd.get("type") == "set_guidance":
+                        guidance_enabled = cmd.get("enabled", True)
+                        print(f"🧭 Guidance mode: {'ON' if guidance_enabled else 'OFF'}")
+                        await websocket.send_text(json.dumps({
+                            "type": "ack",
+                            "message": f"Guidance {'enabled' if guidance_enabled else 'disabled'}"
+                        }))
+                except:
+                    # Echo back for testing
+                    await websocket.send_text(f"Received: {text_data}")
                 
     except WebSocketDisconnect:
         elapsed = time.time() - start_time

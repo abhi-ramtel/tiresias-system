@@ -11,6 +11,7 @@ import MapKit
 
 struct ExpandedMapView: View {
     @ObservedObject var locationManager = LocationManager.shared
+    @ObservedObject var navigationManager: RealTimeNavigationManager
     @Binding var isPresented: Bool
     
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -20,6 +21,30 @@ struct ExpandedMapView: View {
         ZStack {
             // Full map
             Map(position: $cameraPosition) {
+                // Walking route polyline
+                if let route = navigationManager.currentRoute {
+                    MapPolyline(route.polyline)
+                        .stroke(.blue, lineWidth: 4)
+                }
+                
+                // Destination marker
+                if let destination = navigationManager.destinationCoordinate {
+                    Annotation("Destination: \(navigationManager.destinationName)", coordinate: destination) {
+                        VStack(spacing: 4) {
+                            Image(systemName: "mappin.circle.fill")
+                                .font(.title)
+                                .foregroundColor(.red)
+                            
+                            Text(navigationManager.destinationName)
+                                .font(.caption2)
+                                .padding(4)
+                                .background(Color.red.opacity(0.8))
+                                .foregroundColor(.white)
+                                .cornerRadius(4)
+                        }
+                    }
+                }
+                
                 // User location with detailed heading
                 if let location = locationManager.currentLocation {
                     Annotation("Your Location", coordinate: location.coordinate) {
@@ -77,6 +102,46 @@ struct ExpandedMapView: View {
                 
                 // Bottom info panel
                 VStack(spacing: 12) {
+                    // Navigation route info (when navigating)
+                    if navigationManager.hasActiveRoute, let route = navigationManager.currentRoute {
+                        HStack(spacing: 16) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Route Distance")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                Text("\(formatDistance(route.distance))")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                            }
+                            
+                            Divider()
+                                .frame(height: 30)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Est. Time")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                Text("\(formatTime(route.expectedTravelTime))")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                            }
+                            
+                            Divider()
+                                .frame(height: 30)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Steps")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                Text("\(route.steps.count)")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Route info: \(formatDistance(route.distance)), estimated time \(formatTime(route.expectedTravelTime))")
+                    }
+                    
                     // Location info
                     if let location = locationManager.currentLocation {
                         HStack(spacing: 16) {
@@ -141,6 +206,12 @@ struct ExpandedMapView: View {
         .onChange(of: locationManager.currentLocation) { _, newLocation in
             // Don't auto-update camera if user has panned
         }
+        .onChange(of: navigationManager.currentRoute) { _, _ in
+            // Optionally fit map to show full route when it's set
+            if navigationManager.currentRoute != nil {
+                announceForAccessibility("Walking route loaded")
+            }
+        }
         .onAppear {
             recenterMap()
         }
@@ -171,6 +242,25 @@ struct ExpandedMapView: View {
             )
         }
         announceForAccessibility("Map centered on your location")
+    }
+    
+    private func formatDistance(_ meters: Double) -> String {
+        if meters < 1000 {
+            return "\(Int(meters))m"
+        } else {
+            return String(format: "%.1f km", meters / 1000)
+        }
+    }
+    
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        if minutes < 60 {
+            return "\(minutes)m"
+        } else {
+            let hours = minutes / 60
+            let mins = minutes % 60
+            return "\(hours)h \(mins)m"
+        }
     }
     
     private func announceForAccessibility(_ message: String) {
@@ -256,5 +346,5 @@ struct HeadingCone: Shape {
 }
 
 #Preview {
-    ExpandedMapView(isPresented: .constant(true))
+    ExpandedMapView(navigationManager: RealTimeNavigationManager(), isPresented: .constant(true))
 }

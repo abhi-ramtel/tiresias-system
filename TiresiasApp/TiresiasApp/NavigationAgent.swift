@@ -26,6 +26,12 @@ final class NavigationAgent: NSObject, ObservableObject {
     private var silenceTimer: Timer?
     private let silenceThreshold: Float = 0.01
     private let silenceDelay: TimeInterval = 2.0
+    
+    // Callback for real-time navigation
+    private var destinationCallback: ((String) -> Void)?
+    
+    // Flag to prevent recording our own speech
+    private var isListeningActive = false
 
     override init() {
         super.init()
@@ -52,10 +58,29 @@ final class NavigationAgent: NSObject, ObservableObject {
             }
         }
     }
+    
+    // Start listening with callback for real-time navigation
+    func startListeningWithCallback(_ callback: @escaping (String) -> Void) {
+        destinationCallback = callback
+        startListening()
+    }
+    
     // Start listening
     func startListening() {
-        guard recognitionTask == nil else {
-            print("Recognition already in progress")
+        // Stop any existing session
+        stopListening()
+        
+        isListeningActive = true
+        
+        // CRITICAL: Configure audio session FIRST
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            print("✅ Audio session configured for recording")
+        } catch {
+            print("❌ Audio session setup failed:", error)
+            isListeningActive = false
             return
         }
 
@@ -64,69 +89,115 @@ final class NavigationAgent: NSObject, ObservableObject {
         self.request = request
 
         let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
+        
+        // Get the native format from the input node - must be done AFTER audio session is active
+        let nativeFormat = inputNode.inputFormat(forBus: 0)
+        
+        // Use native format if valid, otherwise create a standard recording format
+        let recordingFormat: AVAudioFormat
+        if nativeFormat.sampleRate > 0 {
+            recordingFormat = nativeFormat
+            print("✅ Using native format: \(nativeFormat.sampleRate) Hz")
+        } else {
+            // Fallback to standard recording format
+            guard let fallbackFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1) else {
+                print("❌ Could not create fallback audio format")
+                isListeningActive = false
+                return
+            }
+            recordingFormat = fallbackFormat
+            print("⚠️ Using fallback format: 44100 Hz")
+        }
 
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
+            self?.request?.append(buffer)
         }
 
         do {
             audioEngine.prepare()
             try audioEngine.start()
         } catch {
-            print("Audio engine failed to start:", error)
+            print("❌ Audio engine failed to start:", error)
+            stopListening()
             return
         }
 
-        print("🎤 Listening...")
+        print("🎤 Listening... (speak now)")
+        // Don't speak while listening - it will record the TTS!
+        // Use haptic feedback instead
+        let generator = UIImpactFeedbackGenerator(style: .medium)
+        generator.impactOccurred()
 
-        recognitionTask = speechRecognizer.recognitionTask(with: request) { result, error in
+        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self = self else { return }
+            
             if let result = result {
-                print("Partial transcription:", result.bestTranscription.formattedString)
+                let text = result.bestTranscription.formattedString
+                print("Partial transcription:", text)
 
                 if result.isFinal {
-                    print("✅ Final transcription:", result.bestTranscription.formattedString)
+                    print("✅ Final transcription:", text)
                     self.stopListening()
-                    self.handleUserText(result.bestTranscription.formattedString)
+                    self.handleUserText(text)
                 }
             }
 
             if let error = error {
-                print("Recognition error ❌:", error)
+                print("❌ Recognition error:", error)
                 self.stopListening()
             }
         }
 
         // Automatically stop after 5 sec to force finalization
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self = self else { return }
             if self.audioEngine.isRunning {
                 print("⏱️ Stopping after timeout")
-                self.request?.endAudio() // THIS IS CRUCIAL
+                self.request?.endAudio()
             }
         }
     }
 
     func stopListening() {
+        isListeningActive = false
+        
+        request?.endAudio()
+        
         if audioEngine.isRunning {
             audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
         }
-        recognitionTask?.finish()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        
         recognitionTask?.cancel()
         recognitionTask = nil
         request = nil
+        
+        // Reset audio session for playback
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .voicePrompt, options: [.duckOthers])
+            try audioSession.setActive(true)
+        } catch {
+            print("⚠️ Audio session reset failed:", error)
+        }
     }
     
-    // Speak text
+    // Speak text (only when not listening)
     func speak(_ text: String) {
-            DispatchQueue.main.async {
-                let utterance = AVSpeechUtterance(string: text)
-                utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-                utterance.rate = 0.5
-                self.synthesizer.speak(utterance)
-            }
+        // Don't speak if we're actively listening - it will record our own voice!
+        guard !isListeningActive else {
+            print("⚠️ Skipping TTS while listening")
+            return
         }
+        
+        DispatchQueue.main.async {
+            let utterance = AVSpeechUtterance(string: text)
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            utterance.rate = 0.5
+            self.synthesizer.speak(utterance)
+        }
+    }
     
     // MARK: - Destination extraction using Apple NLP
     func extractDestination(from text: String) -> String {
@@ -153,7 +224,7 @@ final class NavigationAgent: NSObject, ObservableObject {
         }
 
         // Fallback — strip common command words
-        let commandWords = ["take", "me", "to", "go", "navigate", "find", "get", "directions", "show"]
+        let commandWords = ["take", "me", "to", "go", "navigate", "find", "get", "directions", "show", "the", "a", "an"]
         let words = text.lowercased().split(separator: " ")
         let filtered = words.filter { !commandWords.contains(String($0)) }
         return filtered.joined(separator: " ")
@@ -161,10 +232,18 @@ final class NavigationAgent: NSObject, ObservableObject {
     
     // Handle the recognized text
     func handleUserText(_ text: String) {
-        print("User:", text)
+        print("User said:", text)
         let destination = extractDestination(from: text)
         print("Parsed destination:", destination)
-        getDirections(to: destination)
+        
+        // If callback is set, use it for real-time navigation
+        if let callback = destinationCallback {
+            destinationCallback = nil // Clear callback
+            callback(destination)
+        } else {
+            // Fallback: just speak directions once
+            getDirections(to: destination)
+        }
     }
     
     // MARK: - MapKit
@@ -188,19 +267,58 @@ final class NavigationAgent: NSObject, ObservableObject {
     }
 
     func getDirections(to destination: String) {
-        searchPlace(named: destination) { place in
-            guard let place = place, let userLocation = self.locationManager.location else { return }
+        print("🗺️ Getting directions to: \(destination)")
+        speak("Finding directions to \(destination)")
+        
+        searchPlace(named: destination) { [weak self] place in
+            guard let self = self else { return }
+            
+            guard let place = place else {
+                print("❌ Place not found: \(destination)")
+                self.speak("Could not find \(destination)")
+                return
+            }
+            
+            guard let userLocation = self.locationManager.location else {
+                print("❌ No user location available")
+                self.speak("Cannot get your current location")
+                return
+            }
+            
+            print("✅ Found place: \(place.name ?? destination)")
 
             let request = MKDirections.Request()
             request.source = MKMapItem(placemark: MKPlacemark(coordinate: userLocation.coordinate))
             request.destination = place
             request.transportType = .walking
 
-            MKDirections(request: request).calculate { response, error in
-                guard let route = response?.routes.first else { return }
+            MKDirections(request: request).calculate { [weak self] response, error in
+                guard let self = self else { return }
+                
+                if let error = error {
+                    print("❌ Directions error: \(error)")
+                    self.speak("Could not calculate route")
+                    return
+                }
+                
+                guard let route = response?.routes.first else {
+                    print("❌ No routes found")
+                    self.speak("No walking route available")
+                    return
+                }
+                
                 let steps = route.steps.map { $0.instructions }
-                let spoken = steps.filter { !$0.isEmpty }.joined(separator: ". ")
-                self.speak(spoken)
+                let validSteps = steps.filter { !$0.isEmpty }
+                
+                print("✅ Got \(validSteps.count) navigation steps")
+                
+                if validSteps.isEmpty {
+                    self.speak("The destination is very close. Walk straight ahead.")
+                } else {
+                    let spoken = validSteps.joined(separator: ". ")
+                    print("📢 Speaking: \(spoken)")
+                    self.speak(spoken)
+                }
             }
         }
     }
